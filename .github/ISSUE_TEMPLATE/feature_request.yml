@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a focused improvement or integration
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem is not solved today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Compatibility, privacy, and platform impact
+      description: Note any Hermes upstream, hook, stored-data, or installer implications.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

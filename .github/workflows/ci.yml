@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test on macOS
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Sync locked development environment
+        run: uv sync --frozen --group dev
+      - name: Run full test suite
+        run: uv run pytest -o addopts='' -q
+      - name: Validate shell syntax
+        run: |
+          set -euo pipefail
+          sources="${RUNNER_TEMP:-/tmp}/shell-sources.tsv"
+          python3 scripts/list-shell-sources.py > "$sources"
+          checked=0
+          while IFS=$'\t' read -r checker path; do
+            [ -n "${path:-}" ] || continue
+            echo "$checker -n $path"
+            "$checker" -n "$path"
+            checked=$((checked + 1))
+          done < "$sources"
+          [ "$checked" -gt 0 ] || { echo "no shell sources were checked" >&2; exit 1; }
+          echo "checked $checked shell sources"
+      - name: Compile Python sources
+        run: uv run python -m compileall -q src scripts integrations tests
+      - name: Check whitespace
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+  # Real release production needs a local Hermes object database holding the
+  # reviewed pin, so it is opt-in rather than part of every pull request: the
+  # pin can stop being reachable from upstream `main` for reasons that have
+  # nothing to do with the change under review. The local release-candidate
+  # gate in docs/maintenance.md runs the same test and is the binding one.
+  release-integration:
+    name: Real release production on macOS
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Sync locked development environment
+        run: uv sync --frozen --group dev
+      - name: Mirror the official Hermes object database
+        run: |
+          set -euo pipefail
+          git clone --bare --no-tags --single-branch --branch main \
+            https://github.com/NousResearch/hermes-agent.git \
+            "${RUNNER_TEMP}/hermes-source.git"
+          git -C "${RUNNER_TEMP}/hermes-source.git" cat-file -e \
+            "$(cat patches/hermes-agent-supported-upstream)^{commit}"
+      - name: Produce and verify a real release
+        env:
+          UNIFIED_KANBAN_TEST_HERMES_SOURCE: ${{ runner.temp }}/hermes-source.git
+          UNIFIED_KANBAN_TEST_HERMES_REQUIRED: "1"
+        run: uv run pytest -o addopts='' -q tests/test_hermes_release_integration.py

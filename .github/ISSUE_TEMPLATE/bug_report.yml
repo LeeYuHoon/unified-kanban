@@ -1,0 +1,46 @@
+name: Bug report
+description: Report reproducible incorrect behavior without private agent data
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste credentials, prompt bodies, transcripts, Kanban databases, or private paths.
+  - type: input
+    id: revision
+    attributes:
+      label: Unified Kanban revision
+      description: Commit SHA or release version
+    validations:
+      required: true
+  - type: input
+    id: hermes
+    attributes:
+      label: Hermes version and upstream SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS, Linux (unverified), Windows/WSL2 (unsupported), Other]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+    validations:
+      required: true

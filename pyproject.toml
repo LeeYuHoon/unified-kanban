@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-kanban"
+version = "0.1.0"
+description = "Repository-contained adapters connecting Hermes Kanban to external coding agents"
+readme = "README.en.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "LeeYuHoon" }]
+keywords = ["hermes-agent", "kanban", "claude-code", "codex", "observability"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/LeeYuHoon/unified-kanban"
+Documentation = "https://github.com/LeeYuHoon/unified-kanban#readme"
+Issues = "https://github.com/LeeYuHoon/unified-kanban/issues"
+Changelog = "https://github.com/LeeYuHoon/unified-kanban/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = ["pytest==9.0.3"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+markers = [
+  "integration: real release production against the reviewed upstream object database and carried bundle; opt in with UNIFIED_KANBAN_TEST_HERMES_SOURCE",
+]

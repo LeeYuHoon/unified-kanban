@@ -1,0 +1,57 @@
+name: Hermes upstream compatibility
+
+on:
+  schedule:
+    # 03:00 KST (Korea has no daylight-saving time).
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-upstream-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-upstream:
+    name: Verify reviewed Hermes upstream
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compare reviewed pin with Hermes main
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(tr -d '\r\n' < patches/hermes-agent-supported-upstream)"
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Malformed supported-upstream pin" >&2
+            exit 1
+          }
+          latest="$(git ls-remote https://github.com/NousResearch/hermes-agent.git refs/heads/main | cut -f1)"
+          [[ "$latest" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Could not resolve Hermes origin/main" >&2
+            exit 1
+          }
+          if [[ "$latest" != "$pin" ]]; then
+            echo "Hermes upstream changed: reviewed=$pin latest=$latest" >&2
+            echo "Follow docs/hermes-update-checklist.md; never move the pin automatically." >&2
+            exit 1
+          fi
+          echo "Hermes upstream remains at reviewed pin $pin"
+      - name: Validate carried bundle checksum, prerequisite, size and ordered refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          pin="$(tr -d '\r\n' < patches/hermes-agent-supported-upstream)"
+          git clone --quiet --no-checkout \
+            https://github.com/NousResearch/hermes-agent.git \
+            "$temporary/hermes"
+          git -C "$temporary/hermes" checkout --quiet --detach "$pin"
+          python3 scripts/verify-carried-bundle.py \
+            --hermes-repo "$temporary/hermes"
