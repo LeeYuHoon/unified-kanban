@@ -1,0 +1,181 @@
+# Open-source readiness review — 2026-08-07
+
+## Verdict
+
+The repository now has the documentation, licensing, contribution, security, CI, maintenance, package metadata, and code-level responsibility descriptions expected for an alpha open-source release. Runtime behavior remains covered by 654 tests, and the final independent fail-closed review passed without findings. Publication is not yet complete: the GitHub repository is still private, the current working tree is uncommitted, remote Actions have not run against these files, and the license/history choices below still require owner approval.
+
+## 1. README and user documentation
+
+### Before the audit
+
+The Korean README already described the user problem, architecture, installation, privacy, token semantics, Hermes compatibility, updater behavior, uninstall, and real verification evidence. Its main gaps were an English entry point, a navigable repository structure, contribution/security/license links, explicit CI/maintenance policy, and a safe 03:00 automation explanation.
+
+### Added or clarified
+
+- `README.en.md`: concise English overview, advantages, support boundary, quick start, development links.
+- `README.md`: language link, directory/code policy, test model, GitHub maintenance, 03:00 KST upstream check, contribution/security/license links.
+- `docs/project-structure.md`: directory tree, module responsibilities, dependency direction, comments/docstrings policy, refactoring assessment.
+- `docs/maintenance.md`: branch/release policy, PR gates, dependencies, security, backup/rollback, maintainer duties, daily upstream workflow.
+- `CHANGELOG.md`: Keep a Changelog / semantic-version release record beginning with `Unreleased`.
+
+## 2. Directory and code quality review
+
+### Structure
+
+The repository has useful boundaries:
+
+- `bin/`: installed wrappers only;
+- `scripts/`: host configuration, update, uninstall and smoke operations;
+- `src/kanban_adapter/`: provider-neutral card, state, usage and compatibility logic;
+- `integrations/`: thin Hermes plugin and read-only session viewer;
+- `patches/`: one exact Hermes pin plus ordered carried stack and portable bundle;
+- `tests/`: unit and temporary-environment integration tests;
+- `.github/`: CI, scheduled compatibility check, issue and PR templates.
+
+Generated `src/unified_kanban.egg-info` metadata was removed from version control; `.gitignore` already prevents regeneration from being committed.
+
+### Comments and docstrings
+
+All non-test Python modules now have module-level responsibility descriptions. Critical integration entry points—backend mutations, CLI dispatch, hook dispatch, Hermes lifecycle, compatibility command, plugin registration, symlink management and session-viewer command construction—have concise docstrings. Existing comments explain failure ordering, race defenses, provider token semantics and privacy boundaries rather than restating syntax.
+
+Not every small rendering/property helper receives a docstring. That is intentional: public integration contracts and non-obvious behavior are documented; obvious local helpers are kept readable through names and tests.
+
+### Refactoring assessment
+
+No broad pre-release refactor is recommended. The adapter already shares Claude/Codex lifecycle logic and separates compatibility, backend, token and usage concerns. Large rewrites immediately before publication would increase risk without changing user behavior.
+
+Tracked follow-up candidates:
+
+1. The approximately 2,800-line session viewer combines parsing, normalization, terminal rendering and export. Split it only as behavior-preserving work protected by its 159 tests.
+2. `setup.sh` is large, but its visible preflight-before-write order is a security contract. Extract only helpers that preserve and test that order.
+3. `usage.py` is sizeable but cohesive. Split provider details only when another provider causes measurable conditional complexity.
+
+These are maintainability items, not release blockers.
+
+## 3. Test execution model
+
+The locked development environment is created with:
+
+```bash
+uv sync --frozen --group dev
+```
+
+The complete deterministic suite runs with:
+
+```bash
+uv run pytest -o addopts='' -q
+```
+
+It includes:
+
+- pure normalization/serialization unit tests;
+- hook lifecycle, retry and idempotency tests;
+- temporary HOME and Git-repository setup/uninstall/updater tests;
+- symlink, permission, descriptor-identity and TOCTOU defenses;
+- exact Hermes compatibility and installed-wrapper subprocess tests;
+- session viewer provider, redaction, CLI and render tests.
+
+Release candidates additionally require local Hermes CLI smoke, setup dry-run, Gateway/Dashboard and browser checks where applicable. CI cannot substitute for those host integration checks.
+
+Latest local evidence:
+
+- full pytest: **654 passed in 94.01s**;
+- `uv build`: source distribution and wheel built successfully with the MIT license included;
+- shell syntax, Python compile and `git diff --check`: passed;
+- exact pin equals current Hermes `origin/main`;
+- active Hermes `HEAD` equals the final carried commit and `hermes version` reports the pin;
+- carried manifest/bundle: **11 manifest entries / 11 refs**;
+- bundle integrity metadata: **35,111 bytes**, SHA-256
+  `376683f2e2572633f4bc6f6548a8b2cc064e70eb8b04d904d0613882887f7cd3`, prerequisite equals the
+  reviewed pin; CI and `tests/test_carried_bundle.py` validate these values, pack checksum, unique
+  ordered refs, regular non-symlink inputs, strict metadata, and an isolated Git unbundle;
+- fresh bundle import: 11 sanitized project-noreply identities, no personal maintainer email;
+- Hermes Agent copyright and MIT terms preserved in `THIRD_PARTY_NOTICES.md`;
+- wheel smoke: no mutation console script or embedded mutable pin; direct module CLI failed closed;
+- ignored `dist/` build outputs cleared after wheel verification to prevent accidental stale upload;
+- GitHub workflow audit (`zizmor`): **no findings**;
+- tracked runtime files: none;
+- personal home-directory or macOS temporary paths in publication files: none;
+- credential scan findings: no real credentials (redaction detector patterns and synthetic test tokens were reviewed as fixtures).
+
+### Independent-review hardening
+
+The first publication reviews failed closed on three real blockers. Runtime compatibility had trusted
+only `origin/main`, which could be stale while another checkout was active; distribution metadata
+published a console script that bypassed the repository wrapper; and compressed carried commit
+metadata exposed a maintainer email without preserving the upstream license notice alongside the
+bundle. All were corrected before this report was considered complete: runtime now binds pin,
+tracking ref, active `HEAD`, final carried commit and CLI-reported upstream; the wheel publishes no
+mutation console script, while direct module execution applies the same gate and fails closed without
+repository policy files; the 11 carried commits were metadata-rewritten to a project noreply identity
+with identical final trees, and the full Hermes Agent MIT notice is distributed. New regressions and
+fresh-import checks cover stale refs, a different active CLI, the unguarded-entry-point prohibition,
+packaged-wheel behavior, ordered bundle refs, identity privacy and third-party notice inclusion.
+An independent fail-closed re-review passed the runtime, packaging and privacy corrections. A stricter
+follow-up then caught stale pre-rewrite SHAs and a missing bundle checksum in the dated verification
+record. The record now uses all 11 current manifest SHAs in order and records the verified checksum,
+size and prerequisite; repository tests and the scheduled workflow execute the same deterministic
+bundle verifier. Successive focused reviews then exercised undeclared refs, malformed manifests,
+duplicate metadata keys and commit SHAs, payload corruption, symlinks, path swaps and same-inode
+in-place writes. The verifier now rejects each case, validates pack integrity, and performs an isolated
+Git verify/unbundle against the reviewed prerequisite. The final read-only re-review reproduced these
+cases and passed with no security, logic or documentation findings.
+
+## 4. Project management and 03:00 automation
+
+### Pull requests and releases
+
+`.github/workflows/ci.yml` runs the locked full suite, shell syntax, Python compile and whitespace checks on macOS. Actions are pinned to full commit SHAs and checkout credentials are not persisted. Dependabot proposes monthly Python and Actions updates with a seven-day cooldown.
+
+Pull requests use a checklist for compatibility, privacy, exact commands and rollback. User-visible work enters `CHANGELOG.md`. The first planned public release is `v0.1.0`; no tag currently exists.
+
+### Daily 03:00 KST
+
+`.github/workflows/hermes-upstream-check.yml` runs daily at 18:00 UTC (03:00 KST). It compares Hermes `main` with the repository-owned reviewed pin and validates manifest/bundle counts.
+
+It deliberately does not move the pin or accept a new upstream automatically. An unreviewed automatic update would invalidate the exact-upstream safety promise. A mismatch becomes a visible failed maintenance run; the maintainer then executes the update checklist, rebases carried commits, regenerates the bundle, runs all gates, and updates the release unit in one reviewed PR.
+
+A local maintainer may schedule `scripts/update-hermes-if-needed.sh` at 03:00. That script mutates only when fetched upstream already equals the reviewed pin and refuses an unsupported upstream before `hermes update` or marker creation. Scheduler installation is not forced on contributors during setup.
+
+## 5. Advantages over the original Hermes Kanban flow
+
+- Records Claude Code, Codex and Hermes user turns in one board while preserving native Hermes dispatch.
+- Uses one prompt per observation card instead of treating an entire session as one task.
+- Routes by Dashboard project directory without per-project environment configuration.
+- Keeps full results accessible while showing bounded summaries in lists.
+- Reports model and token families truthfully, preserving unknown/unavailable data instead of fabricating zero.
+- Tracks Skill, subagent and MCP usage on the parent card while suppressing duplicate auxiliary-worker cards.
+- Keeps observation cards outside dispatcher execution semantics.
+- Survives retries through deterministic event IDs and private atomic state.
+- Installs from one Git source with dry-run, ownership-aware uninstall and foreign-config preservation.
+- Refuses unsupported Hermes upstream revisions at setup, updater and runtime boundaries without blocking normal Hermes use.
+- Preserves the carried Hermes patch stack in a reproducible manifest and portable thin bundle.
+
+## 6. Open-source governance files
+
+Added:
+
+- `LICENSE` — MIT (permissive default; confirm before the first public tag if a different policy is desired);
+- `CONTRIBUTING.md`;
+- `SECURITY.md` with private advisory reporting;
+- `CODE_OF_CONDUCT.md`;
+- `CHANGELOG.md`;
+- `.editorconfig`;
+- issue forms and pull-request template;
+- CI, scheduled upstream compatibility and Dependabot configuration.
+
+## 7. Remaining publication gates
+
+1. Receive a passing independent review of the current diff.
+2. Review the selected MIT license and copyright holder before tagging.
+3. Commit the current focused working tree and push it to `main` through the chosen review workflow.
+4. Confirm the new GitHub Actions runs pass remotely.
+5. Enable branch protection/rulesets for `main`, required CI, and private vulnerability reporting in GitHub settings.
+6. Decide whether to rewrite the existing private Git history before publication. Historical Unified
+   Kanban commit author metadata contains the maintainer's personal email even though the current
+   carried bundle has been sanitized. Rewriting/force-pushing history requires explicit maintainer
+   approval; otherwise that attribution email will become public with the repository history.
+7. Change repository visibility from **PRIVATE** to **PUBLIC** only after the above checks.
+8. Create the first annotated `v0.1.0` tag and GitHub release from the verified commit.
+
+Until these gates are complete, the code is locally publication-ready but should not be described as a released public project.

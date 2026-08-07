@@ -1,0 +1,24 @@
+# Reapply local Hermes Agent fixes after `hermes update` resets main to origin/main.
+# The thin recovery bundle requires supported upstream commit 0957277f2f468bac22bbfcfa7c43029858c9597e.
+# Kanban CLI delete command and selected-board Dashboard delete routing.
+f64bb1a9630f87f7a5e3e89ac4f6e25282f5b352
+# External observation cards (`kanban create --observation`) for the unified adapter.
+bb95882dd8c093310cd6592b40866e8d730e42df
+# Observation lifecycle guards for dispatcher budgets and Dashboard mutations.
+6f6e90aebda2ee841d1e40779d3e0f185eeec898
+# Observation idempotency, worker-helper, and run-history invariant hardening.
+a8dadf2d05159d48acad21f6f805c1d3908f3db7
+# Kanban Dashboard token aggregation, coverage, badges, and task detail UI.
+a9145de8df20cff24add16db8261b04b0dbac12d
+# Accept token-aware schema v2 while retaining legacy schema v1 records.
+c44300a0f524fe7549d8d810a007d2d1c70138d6
+# Harden all-time rollups, telemetry ownership, and bucket coverage.
+cc9b8759a38498b494d5a25c74059fb32b06df4b
+# Preserve full task results and expand them from concise Dashboard summaries.
+3b2913dd268370dc01df40f4ab7bc0ef677bd2c0
+# Preserve bounded summaries for observation cards that intentionally have no run rows.
+84da7f3ee780ea2ec29749df1ea006e8fc0d3200
+# Preserve board totals when archived cards are explicitly included after upstream API changes.
+abc0fa4ece406864ba760e88da77a6552bfcbd5a
+# Break down Dashboard token totals by Claude/GPT/other model family and spell out token labels.
+a98adc0305020cebd9209a7182e09bf74e5e6759

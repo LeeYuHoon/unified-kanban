@@ -1,0 +1,11 @@
+name: hermes-kanban
+version: "0.4.0"
+description: "Create and complete unified Hermes Kanban cards for every Hermes conversation turn, recording model, token, Skill, subagent, and MCP usage."
+author: local
+hooks:
+  - pre_llm_call
+  - post_tool_call
+  - subagent_start
+  - post_llm_call
+  - post_api_request
+  - on_session_end
