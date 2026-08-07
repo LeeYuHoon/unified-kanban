@@ -27,7 +27,7 @@ Issues = "https://github.com/LeeYuHoon/unified-kanban/issues"
 Changelog = "https://github.com/LeeYuHoon/unified-kanban/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-dev = ["pytest==9.0.2"]
+dev = ["pytest==9.1.1"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
