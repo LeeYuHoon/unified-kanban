@@ -133,6 +133,27 @@ def plugin_target(tmp_path: Path) -> Path:
     return tmp_path / ".hermes/plugins/hermes-kanban"
 
 
+
+def create_verified_bootstrap_artifacts(tmp_path: Path, agent_repo: Path) -> None:
+    hermes_home = tmp_path / ".hermes"
+    (agent_repo / ".git").mkdir(parents=True, exist_ok=True)
+    (agent_repo / ".git/HEAD").write_text(SUPPORTED_SHA + "\n", encoding="utf-8")
+    (agent_repo / ".hermes-bootstrap-complete").write_text(
+        f'{{\n  "schemaVersion": 1,\n  "pinnedCommit": "{SUPPORTED_SHA}"\n}}\n', encoding="utf-8"
+    )
+    (agent_repo / ".install_method").write_text("git\n", encoding="utf-8")
+    for executable in (agent_repo / "hermes", agent_repo / "venv/bin/python", hermes_home / "bin/uv"):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    launcher = tmp_path / ".local/bin/hermes"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(
+        "#!/usr/bin/env bash\nunset PYTHONPATH\nunset PYTHONHOME\n"
+        f'exec "{agent_repo}/venv/bin/python" "{agent_repo}/hermes" "$@"\n', encoding="utf-8"
+    )
+    launcher.chmod(0o755)
+
 def test_setup_installs_and_enables_repo_plugin_idempotently(tmp_path: Path) -> None:
     env = environment(tmp_path)
 
@@ -306,3 +327,123 @@ def test_uninstall_without_installed_plugin_skips_disable(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     assert not any("plugins disable" in call for call in hermes_calls(env))
+
+
+
+def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_smoke(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    fixture_root = Path(env["_TEST_ROOT"])
+    fake_bin = Path(env["PATH"].split(":", 1)[0])
+    source_hermes = tmp_path / "fake-hermes-source"
+    source_hermes.write_text(FAKE_HERMES, encoding="utf-8")
+    source_hermes.chmod(0o755)
+    env["FAKE_HERMES_EXECUTABLE"] = str(source_hermes)
+    (fake_bin / "hermes").unlink()
+    for command in ("uv", "npm"):
+        executable = fake_bin / command
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    Path(env["HERMES_AGENT_REPO"]).rmdir()
+    bootstrap_log = tmp_path / "bootstrap.log"
+    env["BOOTSTRAP_TEST_LOG"] = str(bootstrap_log)
+    bootstrap = fixture_root / "scripts/bootstrap-hermes-macos.sh"
+    bootstrap.write_text(
+        "#!/bin/bash\n"
+        "set -eu\n"
+        "if [ \"${1:-}\" = --status ]; then\n"
+        "  if [ -f \"${XDG_STATE_HOME}/unified-kanban/hermes-bootstrap.receipt\" ]; then echo bootstrap-complete; else echo bootstrap-absent; fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' \"$@\" >>\"$BOOTSTRAP_TEST_LOG\"\n"
+        "repo=$1\n"
+        "home=$2\n"
+        "mkdir -p \"$repo\" \"$HOME/.local/bin\" "
+        "\"${XDG_STATE_HOME}/unified-kanban\"\n"
+        "cp \"$FAKE_HERMES_EXECUTABLE\" \"$HOME/.local/bin/hermes\"\n"
+        "chmod +x \"$HOME/.local/bin/hermes\"\n"
+        "cat >\"${XDG_STATE_HOME}/unified-kanban/hermes-bootstrap.receipt\" <<EOF\n"
+        "format=unified-kanban-hermes-bootstrap-receipt-v1\n"
+        f"upstream={SUPPORTED_SHA}\n"
+        "agent_repo=$repo\n"
+        "hermes_home=$home\n"
+        "status=bootstrap-complete\n"
+        "python_requirement=3.11\n"
+        "node_major=26\n"
+        "toolchain_resolution=moving-patch-and-tool-versions\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    bootstrap.chmod(0o755)
+    bundle = fixture_root / "patches/hermes-agent-carried.bundle"
+    bundle.unlink()
+
+    failed = run(SETUP, env)
+
+    assert failed.returncode != 0
+    assert Path(env["HERMES_AGENT_REPO"]).is_dir(), failed.stderr
+    assert (tmp_path / ".local/bin/hermes").is_file()
+    assert bootstrap_log.read_text(encoding="utf-8").splitlines() == [
+        env["HERMES_AGENT_REPO"],
+        str(tmp_path / ".hermes"),
+    ]
+    assert hermes_calls(env) == []
+
+    shutil.copy2(REPO / "patches/hermes-agent-carried.bundle", bundle)
+    retried = run(SETUP, env)
+    rerun = run(SETUP, env)
+
+    assert retried.returncode == 0, retried.stderr
+    assert rerun.returncode == 0, rerun.stderr
+    assert "authenticated smoke deferred" in retried.stdout.lower()
+    assert "scripts/kanban-smoke.sh" in retried.stdout
+    assert "authenticated smoke deferred" in rerun.stdout.lower()
+    assert "scripts/kanban-smoke.sh" in rerun.stdout
+    assert bootstrap_log.read_text(encoding="utf-8").splitlines() == [
+        env["HERMES_AGENT_REPO"],
+        str(tmp_path / ".hermes"),
+    ]
+    assert not any("kanban boards list --json" in call for call in hermes_calls(env))
+
+
+def test_bootstrap_managed_setup_finds_uv_in_hermes_home_bin(tmp_path: Path) -> None:
+    env = environment(tmp_path)
+    create_verified_bootstrap_artifacts(tmp_path, Path(env["HERMES_AGENT_REPO"]))
+    fake_bin = Path(env["PATH"].split(":", 1)[0])
+    managed_bin = tmp_path / ".hermes/bin"
+    managed_bin.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(shutil.which("uv") or "", managed_bin / "uv")
+    (fake_bin / "uv").unlink(missing_ok=True)
+    (fake_bin / "npm").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "npm").chmod(0o755)
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    state = tmp_path / ".local/state/unified-kanban"
+    state.mkdir(parents=True)
+    state.chmod(0o700)
+    receipt = state / "hermes-bootstrap.receipt"
+    receipt.write_text(
+        "format=unified-kanban-hermes-bootstrap-receipt-v1\n"
+        f"upstream={SUPPORTED_SHA}\n"
+        f"agent_repo={env['HERMES_AGENT_REPO']}\n"
+        f"hermes_home={tmp_path / '.hermes'}\n"
+        "status=bootstrap-complete\n"
+        "python_requirement=3.11\n"
+        "node_major=26\n"
+        "toolchain_resolution=moving-patch-and-tool-versions\n",
+        encoding="utf-8",
+    )
+    receipt.chmod(0o600)
+    bootstrap = Path(env["_TEST_ROOT"]) / "scripts/bootstrap-hermes-macos.sh"
+    bootstrap.write_text(
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = --status ]; then printf 'bootstrap-complete\\n'; exit 0; fi\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    bootstrap.chmod(0o755)
+
+    result = run(SETUP, env, "--skip-smoke")
+
+    assert result.returncode == 0, result.stderr

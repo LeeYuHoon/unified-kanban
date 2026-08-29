@@ -68,14 +68,65 @@ if [[ -n "$PROJECT_DIR" || -n "$BOARD" ]]; then
   PROJECT_DIR="$(cd -P -- "$PROJECT_DIR" && pwd)"
 fi
 
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+[[ "$HERMES_HOME" == /* ]] || {
+  echo "HERMES_HOME must be an absolute path: $HERMES_HOME" >&2
+  exit 1
+}
+AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
+[[ "$AGENT_REPO" == /* ]] || {
+  echo "HERMES_AGENT_REPO must be an absolute path: $AGENT_REPO" >&2
+  exit 1
+}
+case "$HERMES_HOME$AGENT_REPO" in
+  *$'\n'*) echo "Hermes paths must not contain newlines" >&2; exit 1 ;;
+esac
+BOOTSTRAP_RECEIPT="$STATE_DIR/hermes-bootstrap.receipt"
+BOOTSTRAP_HELPER="$REPO_ROOT/scripts/bootstrap-hermes-macos.sh"
+HERMES_BOOTSTRAP_MANAGED=0
+if [[ ! -d "$AGENT_REPO" ]]; then
+  if command -v hermes >/dev/null 2>&1; then
+    echo "Hermes Agent checkout not found at $AGENT_REPO; a foreign Hermes command is present, so automatic install is refused." >&2
+    exit 1
+  fi
+  if ((DRY_RUN)); then
+    echo "Hermes Agent checkout not found at $AGENT_REPO; dry-run will not bootstrap a host." >&2
+    exit 1
+  fi
+  BOOTSTRAP_STATUS="$("$BOOTSTRAP_HELPER" --status "$AGENT_REPO" "$HERMES_HOME")" || exit 1
+  [[ "$BOOTSTRAP_STATUS" == bootstrap-absent ]] || {
+    echo "Unexpected Hermes bootstrap status: $BOOTSTRAP_STATUS" >&2
+    exit 1
+  }
+  "$BOOTSTRAP_HELPER" "$AGENT_REPO" "$HERMES_HOME"
+  BOOTSTRAP_STATUS="$("$BOOTSTRAP_HELPER" --status "$AGENT_REPO" "$HERMES_HOME")" || exit 1
+  [[ "$BOOTSTRAP_STATUS" == bootstrap-complete ]] || {
+    echo "Hermes bootstrap did not publish a verified completion receipt" >&2
+    exit 1
+  }
+  HERMES_BOOTSTRAP_MANAGED=1
+elif [[ -e "$BOOTSTRAP_RECEIPT" || -L "$BOOTSTRAP_RECEIPT" ]]; then
+  BOOTSTRAP_STATUS="$("$BOOTSTRAP_HELPER" --status "$AGENT_REPO" "$HERMES_HOME")" || exit 1
+  [[ "$BOOTSTRAP_STATUS" == bootstrap-complete ]] || {
+    echo "Unexpected Hermes bootstrap status: $BOOTSTRAP_STATUS" >&2
+    exit 1
+  }
+  HERMES_BOOTSTRAP_MANAGED=1
+fi
+if ((HERMES_BOOTSTRAP_MANAGED)); then
+  export PATH="$AGENT_REPO/venv/bin:$HERMES_HOME/bin:$HERMES_HOME/node/bin:$HOME/.local/bin:$PATH"
+fi
+
 for cmd in python3 hermes git uv; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "Missing required command: $cmd" >&2; exit 1; }
+  command -v "$cmd" >/dev/null 2>&1 || { echo "Missing required command after Hermes bootstrap: $cmd" >&2; exit 1; }
 done
 python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
   echo "Python 3.11 or newer is required" >&2
   exit 1
 }
-hermes --version >/dev/null
+if ((HERMES_BOOTSTRAP_MANAGED == 0)); then
+  hermes --version >/dev/null
+fi
 has_help_token() {
   local text="$1" expected="$2"
   printf '%s\n' "$text" | python3 -c '
@@ -119,20 +170,10 @@ validate_kanban_cli_contract() {
   }
 }
 
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-[[ "$HERMES_HOME" == /* ]] || {
-  echo "HERMES_HOME must be an absolute path: $HERMES_HOME" >&2
-  exit 1
-}
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_PLUGIN_SOURCE="$REPO_ROOT/integrations/hermes/hermes-kanban"
 HERMES_PLUGIN_TARGET="$HERMES_HOME/plugins/hermes-kanban"
 LEGACY_HERMES_PLUGIN_SOURCE="$(dirname "$REPO_ROOT")/hermes-kanban/plugin/hermes-kanban"
-AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
-[[ "$AGENT_REPO" == /* ]] || {
-  echo "HERMES_AGENT_REPO must be an absolute path: $AGENT_REPO" >&2
-  exit 1
-}
 # Derive one normal form before anything is computed from it. Concatenating
 # ".releases" onto a denormalized path would name a hidden directory inside the
 # Hermes checkout while every Python caller keeps using the sibling, so the
@@ -416,7 +457,7 @@ PY
   fi
 fi
 
-if ((SKIP_SMOKE == 0)); then
+if ((SKIP_SMOKE == 0 && HERMES_BOOTSTRAP_MANAGED == 0)); then
   SMOKE_BOARD="${KANBAN_SMOKE_BOARD:-unified-kanban-smoke}"
   BOARDS_JSON="$(hermes kanban boards list --json)"
   if python3 - "$SMOKE_BOARD" "$BOARDS_JSON" <<'PY'
@@ -711,7 +752,7 @@ if ((NO_RESTART == 0)); then
   fi
   ensure_macos_gateway_supervised "$HERMES_CLI" sealed "${HERMES_RELEASE:-}"
 fi
-if ((SKIP_SMOKE == 0)); then
+if ((SKIP_SMOKE == 0 && HERMES_BOOTSTRAP_MANAGED == 0)); then
   run_without_transaction_authority "$REPO_ROOT/scripts/kanban-smoke.sh"
 fi
 
@@ -723,6 +764,10 @@ Claude Code and Codex hooks are installed. Restart each CLI before testing a new
 The Hermes Agent plugin (hermes-kanban) records every Hermes turn on the same boards.
 The ai-session-viewer command provides a read-only Claude, Codex, and Hermes session timeline.
 EOF
+if ((SKIP_SMOKE == 0 && HERMES_BOOTSTRAP_MANAGED)); then
+  echo "Hermes runtime is installed; provider configuration or smoke board may be absent, so authenticated smoke deferred."
+  echo "After configuring a provider and smoke board, run: $REPO_ROOT/scripts/kanban-smoke.sh"
+fi
 
 if ((HERMES_PLUGIN_ENABLED)); then
   cat >&2 <<'EOF'
