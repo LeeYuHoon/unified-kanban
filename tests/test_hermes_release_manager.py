@@ -501,6 +501,156 @@ def test_managed_launcher_executes_only_selected_release(tmp_path: Path) -> None
     assert "invalid Hermes release selector" in rejected.stderr
 
 
+def test_managed_launcher_blocks_native_update_before_selector_access(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    launcher = tmp_path / "hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(launcher), "update"], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == (
+        "Native `hermes update` is disabled for this unified-kanban managed immutable release.\n"
+        "Check managed release status with:\n"
+        "  ./scripts/update-hermes-if-needed.sh --check\n"
+        "Activate the reviewed release with:\n"
+        "  ./scripts/update-hermes-if-needed.sh\n"
+    )
+    assert not layout.root.exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["update", "--check"],
+        ["update", "--gateway"],
+        ["update", "--yes"],
+        ["update", "--force"],
+        ["update", "--branch", "main"],
+        ["update", "-b", "main"],
+        ["update", "--plan", "--yes"],
+        ["update", "--help", "--force"],
+        ["update", "--unknown"],
+    ],
+)
+def test_managed_launcher_blocks_all_mutating_or_mixed_update_forms_before_selector_access(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    launcher = tmp_path / "hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(launcher), *arguments], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 2
+    assert "Native `hermes update` is disabled" in completed.stderr
+    assert not layout.root.exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--provider", "auto", "update", "--check"],
+        ["--provider=auto", "update", "--yes"],
+        ["-m", "model-name", "update", "--force"],
+        ["--verbose", "update"],
+        ["--", "update", "--gateway"],
+    ],
+)
+def test_managed_launcher_blocks_update_after_top_level_global_options(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    launcher = tmp_path / "hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(launcher), *arguments], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 2
+    assert "Native `hermes update` is disabled" in completed.stderr
+    assert not layout.root.exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [["update", "--plan"], ["update", "-h"], ["update", "--help"]],
+)
+def test_managed_launcher_allows_only_exact_read_only_update_forms(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    selected = layout.release / "venv/bin/hermes"
+    selected.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8"
+    )
+    selected.chmod(0o755)
+    layout.selector.write_bytes(helper.selector_payload(layout))
+    launcher = tmp_path / "hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(launcher), *arguments], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout.splitlines() == arguments
+    assert "Native `hermes update` is disabled" not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [["chat", "update"], ["--provider", "auto", "chat", "update"]],
+)
+def test_managed_launcher_does_not_misclassify_update_as_an_ordinary_argument(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    selected = layout.release / "venv/bin/hermes"
+    selected.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8"
+    )
+    selected.chmod(0o755)
+    layout.selector.write_bytes(helper.selector_payload(layout))
+    launcher = tmp_path / "hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run(
+        [str(launcher), *arguments], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout.splitlines() == arguments
+
+
 def test_baseline_token_binds_the_exact_retained_launcher_bytes(tmp_path: Path) -> None:
     helper = load_helper()
     retained = tmp_path / "hermes-launcher.before-unified-kanban"

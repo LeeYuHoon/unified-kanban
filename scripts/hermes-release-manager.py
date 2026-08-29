@@ -446,6 +446,30 @@ def launcher_payload(layout: ReleaseLayout, baseline: str) -> bytes:
         raise ValueError("launcher baseline must be 'absent' or 'sha256:<64 hex>'")
     code = r'''import os,re,stat,sys
 selector,root=sys.argv[1:3]
+arguments=sys.argv[3:]
+allowed_update_forms={("update","--plan"),("update","-h"),("update","--help")}
+value_flags={"-z","--oneshot","-m","--model","--provider","-t","--toolsets","-r","--resume","-s","--skills","--usage-file","--in","-c","--continue"}
+short_value_flags=("-z","-m","-t","-r","-s","-c")
+def first_positional(argv):
+ i=0
+ while i<len(argv):
+  token=argv[i]
+  if token=="--":
+   return argv[i+1] if i+1<len(argv) else None
+  flag=token.split("=",1)[0]
+  attached=any(token.startswith(short) and token!=short for short in short_value_flags)
+  if flag in value_flags:
+   i+=1 if "=" in token else 2
+  elif attached or token.startswith("-"):
+   i+=1
+  else:
+   return token
+ return None
+if first_positional(arguments)=="update" and tuple(arguments) not in allowed_update_forms:
+ print("Native `hermes update` is disabled for this unified-kanban managed immutable release.",file=sys.stderr)
+ print("Check managed release status with:\n  ./scripts/update-hermes-if-needed.sh --check",file=sys.stderr)
+ print("Activate the reviewed release with:\n  ./scripts/update-hermes-if-needed.sh",file=sys.stderr)
+ raise SystemExit(2)
 flags=os.O_RDONLY|getattr(os,"O_CLOEXEC",0)|getattr(os,"O_NOFOLLOW",0)
 try:
  before=os.lstat(selector)
