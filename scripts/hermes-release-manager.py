@@ -1420,6 +1420,13 @@ def _validate_real_directory_ancestry(path: Path) -> None:
     if not path.is_absolute():
         raise RuntimeError("release root must be absolute")
     current = Path(path.anchor)
+    anchor_info = os.lstat(current)
+    if stat.S_ISLNK(anchor_info.st_mode):
+        raise RuntimeError(f"release root has a symlinked ancestor: {current}")
+    if not stat.S_ISDIR(anchor_info.st_mode):
+        raise RuntimeError(f"release root ancestor is not a directory: {current}")
+    if anchor_info.st_uid not in {0, os.getuid()} or stat.S_IMODE(anchor_info.st_mode) & 0o022:
+        raise RuntimeError(f"release root has an untrusted writable ancestor: {current}")
     for component in path.parts[1:]:
         current /= component
         info = os.lstat(current)
@@ -1706,11 +1713,11 @@ def _remove_gc_retirement_record(
 def _resume_gc_retirements(
     capability: _GcRootCapability,
     *,
-    runtime_references: set[Path],
+    agent_repo: Path,
+    runtime_reference_supplier,
     lock_verifier,
 ) -> tuple[list[str], list[dict[str, str]]]:
     root = _gc_root_path(capability)
-    references = _gc_reference_map(root, runtime_references)
     deleted: list[str] = []
     retained: list[dict[str, str]] = []
     records = sorted(root.glob(".gc-retired-*.record"), key=lambda path: path.name)
@@ -1752,6 +1759,25 @@ def _resume_gc_retirements(
         ):
             retained.append({"path": str(retirement), "reason": "retirement-identity-changed"})
             continue
+        try:
+            _verify_gc_release(agent_repo, retirement, canonical_name=release.name)
+        except (OSError, RuntimeError, ValueError) as exc:
+            retained.append(
+                {
+                    "path": str(retirement),
+                    "reason": f"unverified-partial-retirement: {exc}",
+                }
+            )
+            continue
+        observed = os.stat(
+            retirement.name, dir_fd=capability.descriptor, follow_symlinks=False
+        )
+        if (observed.st_dev, observed.st_ino) != identity:
+            retained.append({"path": str(retirement), "reason": "retirement-identity-changed"})
+            continue
+        references = _gc_reference_map(
+            _gc_root_path(capability), set(runtime_reference_supplier())
+        )
         if release in references:
             retained.append({"path": str(retirement), "reason": "referenced-partial-retirement"})
             continue
@@ -1782,7 +1808,8 @@ def apply_release_gc(
         _gc_root_path(capability)
         deleted, retained = _resume_gc_retirements(
             capability,
-            runtime_references=initial_runtime,
+            agent_repo=agent_repo,
+            runtime_reference_supplier=runtime_reference_supplier,
             lock_verifier=lock_verifier,
         )
         for candidate in plan["candidates"]:

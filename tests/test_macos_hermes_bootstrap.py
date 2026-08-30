@@ -86,6 +86,103 @@ def create_bootstrap_artifacts(home: Path, agent_repo: Path, hermes_home: Path) 
     )
     launcher.chmod(0o755)
 
+def test_bootstrap_rejects_home_beneath_writable_ancestor_before_download(
+    tmp_path: Path,
+) -> None:
+    unsafe_parent = tmp_path / "unsafe-parent"
+    unsafe_parent.mkdir(mode=0o700)
+    home = unsafe_parent / "home"
+    home.mkdir(mode=0o700)
+    unsafe_parent.chmod(0o777)
+    curl_ran = tmp_path / "curl-ran"
+    fake_bin = tmp_path / "fake-bin-unsafe-home"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(
+        f"#!/bin/sh\ntouch {curl_ran}\nexit 1\n", encoding="utf-8"
+    )
+    curl.chmod(0o755)
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'Darwin\n'\n", encoding="utf-8")
+    uname.chmod(0o755)
+    rendered = rendered_bootstrap(
+        tmp_path,
+        {"/usr/bin/curl": str(curl), "/usr/bin/uname": str(uname)},
+    )
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(rendered),
+            str(home / ".hermes/hermes-agent"),
+            str(home / ".hermes"),
+        ],
+        env={
+            "HOME": str(home),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "XDG_STATE_HOME": str(home / ".local/state"),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "ancestor" in result.stderr.lower()
+    assert not curl_ran.exists()
+    assert list(home.iterdir()) == []
+
+
+def test_bootstrap_rejects_a_writable_root_anchor_before_download(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home-root-anchor"
+    home.mkdir()
+    curl_ran = tmp_path / "curl-ran-root-anchor"
+    fake_bin = tmp_path / "fake-bin-root-anchor"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(f"#!/bin/sh\ntouch {curl_ran}\nexit 1\n", encoding="utf-8")
+    curl.chmod(0o755)
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'Darwin\n'\n", encoding="utf-8")
+    uname.chmod(0o755)
+    fake_stat = fake_bin / "stat"
+    fake_stat.write_text(
+        "#!/bin/sh\n"
+        "if [ \"${3:-}\" = / ]; then printf '1:2:0:777:1\n'; "
+        "else exec /usr/bin/stat \"$@\"; fi\n",
+        encoding="utf-8",
+    )
+    fake_stat.chmod(0o755)
+    rendered = rendered_bootstrap(
+        tmp_path,
+        {
+            "/usr/bin/curl": str(curl),
+            "/usr/bin/uname": str(uname),
+            "/usr/bin/stat": str(fake_stat),
+        },
+    )
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(rendered),
+            str(home / ".hermes/hermes-agent"),
+            str(home / ".hermes"),
+        ],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "ancestor" in result.stderr.lower()
+    assert not curl_ran.exists()
+    assert list(home.iterdir()) == []
+
+
 def test_bootstrap_rejects_installer_digest_mismatch_without_host_writes(
     tmp_path: Path,
 ) -> None:
@@ -145,6 +242,7 @@ def test_bootstrap_uses_exact_pinned_installer_argv_and_scrubbed_environment(
         "while [ \"$#\" -gt 0 ]; do\n"
         "  if [ \"$1\" = --output ]; then output=$2; shift 2; else shift; fi\n"
         "done\n"
+        "printf '%s\\n' \"$output\" >\"$HOME/download-output\"\n"
         "/bin/cat >\"$output\" <<'EOF'\n"
         "#!/bin/bash\n"
         "printf '%s\\n' \"$@\" >\"$HOME/installer-argv\"\n"
@@ -180,12 +278,14 @@ def test_bootstrap_uses_exact_pinned_installer_argv_and_scrubbed_environment(
     agent_repo = home / "custom/hermes-agent"
     hermes_home = home / "custom/hermes-home"
     state_home = home / "custom/state"
+    hostile_tmpdir = tmp_path / "hostile-tmp"
+    hostile_tmpdir.mkdir()
     result = subprocess.run(
         ["/bin/bash", str(rendered), str(agent_repo), str(hermes_home)],
         env={
             "HOME": str(home),
             "PATH": "/malicious/bin",
-            "TMPDIR": "/tmp",
+            "TMPDIR": str(hostile_tmpdir),
             "XDG_STATE_HOME": str(state_home),
             "GIT_CONFIG_GLOBAL": "/secret/gitconfig",
             "PYTHONPATH": "/secret/python",
@@ -201,6 +301,10 @@ def test_bootstrap_uses_exact_pinned_installer_argv_and_scrubbed_environment(
     )
 
     assert result.returncode == 0, result.stderr
+    download_output = Path((home / "download-output").read_text(encoding="utf-8").strip())
+    assert download_output.parent.parent == home
+    assert download_output.parent.name.startswith(".unified-kanban-hermes-bootstrap.")
+    assert list(hostile_tmpdir.iterdir()) == []
     assert (home / "installer-argv").read_text(encoding="utf-8").splitlines() == [
         "--commit",
         "10b388300a63d83857fac3ca4f8b05b64e01bc50",
@@ -214,6 +318,8 @@ def test_bootstrap_uses_exact_pinned_installer_argv_and_scrubbed_environment(
     child_env = (home / "installer-env").read_text(encoding="utf-8")
     assert f"HERMES_AGENT_REPO={agent_repo}\n" in child_env
     assert f"HERMES_HOME={hermes_home}\n" in child_env
+    assert f"TMPDIR={download_output.parent}\n" in child_env
+    assert str(hostile_tmpdir) not in child_env
     for forbidden in (
         "GIT_CONFIG_GLOBAL",
         "PYTHONPATH",

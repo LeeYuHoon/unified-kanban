@@ -773,7 +773,7 @@ def test_gc_cli_apply_uses_and_releases_the_shared_updater_lock(
     assert not (hermes_home / "state/hermes-kanban-update.lock").exists()
 
 
-def test_gc_apply_never_restores_a_partially_deleted_retirement(
+def test_gc_apply_retains_a_partially_deleted_retirement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     helper = load_helper()
@@ -814,9 +814,67 @@ def test_gc_apply_never_restores_a_partially_deleted_retirement(
         lock_verifier=lambda: None,
     )
 
-    assert resumed == {"deleted": [str(stale.release)], "retained": []}
-    assert not retired[0].exists()
-    assert not records[0].exists()
+    assert resumed["deleted"] == []
+    assert resumed["retained"] == [
+        {
+            "path": str(retired[0]),
+            "reason": "unverified-partial-retirement: existing release completion receipt does not match content",
+        }
+    ]
+    assert retired[0].is_dir()
+    assert records[0].is_file()
+    assert not stale.release.exists()
+
+
+def test_gc_apply_refreshes_runtime_references_before_resumed_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+
+    def crash_before_delete(_retirement: str, *, dir_fd: int) -> None:
+        raise OSError("injected pre-delete crash")
+
+    monkeypatch.setattr(helper.shutil, "rmtree", crash_before_delete)
+    with pytest.raises(OSError, match="pre-delete crash"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    retired = next(
+        path
+        for path in stale.root.iterdir()
+        if path.name.startswith(".gc-retired-") and path.is_dir()
+    )
+    record = next(stale.root.glob(".gc-retired-*.record"))
+    monkeypatch.undo()
+    runtime_calls = 0
+
+    def runtime_references() -> set[Path]:
+        nonlocal runtime_calls
+        runtime_calls += 1
+        return set() if runtime_calls == 1 else {stale.release}
+
+    resumed = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=runtime_references,
+        lock_verifier=lambda: None,
+    )
+
+    assert runtime_calls >= 2
+    assert resumed == {
+        "deleted": [],
+        "retained": [
+            {"path": str(retired), "reason": "referenced-partial-retirement"}
+        ],
+    }
+    assert retired.is_dir()
+    assert record.is_file()
+    assert not stale.release.exists()
 
 
 def test_gc_apply_validates_release_root_before_resuming_retirements(
@@ -1174,6 +1232,28 @@ def test_gc_apply_preserves_a_foreign_canonical_successor_and_owned_retirement(
     assert len(retired) == 1
     assert len(records) == 1
     assert (retired[0] / helper._COMPLETION_RECEIPT).is_file()
+
+
+def test_gc_dry_run_rejects_a_writable_root_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    build_completed_release(helper, checkout, tmp_path / "release-work-root-anchor")
+    original_lstat = helper.os.lstat
+
+    def writable_root(path):
+        observed = original_lstat(path)
+        if Path(path) == Path(Path(path).anchor):
+            values = list(observed)
+            values[0] |= stat.S_IWOTH
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(helper.os, "lstat", writable_root)
+    with pytest.raises(RuntimeError, match="untrusted writable ancestor"):
+        helper.plan_release_gc(checkout, runtime_references=set())
 
 
 def test_gc_dry_run_rejects_a_writable_release_root_ancestor(tmp_path: Path) -> None:

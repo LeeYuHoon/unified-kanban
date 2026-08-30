@@ -26,17 +26,20 @@ case "$AGENT_REPO$HERMES_HOME_ARG$HOME${XDG_STATE_HOME:-}" in
 esac
 
 umask 077
-tmpdir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/unified-kanban-hermes-bootstrap.XXXXXX") \
-  || fail "unable to create private temporary directory"
-installer="$tmpdir/install.sh"
-marker_snapshot="$tmpdir/bootstrap-marker"
+tmpdir=""
+installer=""
+marker_snapshot=""
 receipt_tmp=""
 cleanup() {
-  /bin/rm -f "$installer" "$marker_snapshot"
+  if [[ -n "$installer" ]]; then
+    /bin/rm -f "$installer" "$marker_snapshot"
+  fi
   if [[ -n "$receipt_tmp" ]]; then
     /bin/rm -f "$receipt_tmp"
   fi
-  /bin/rmdir "$tmpdir" 2>/dev/null || true
+  if [[ -n "$tmpdir" ]]; then
+    /bin/rmdir "$tmpdir" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -67,11 +70,19 @@ require_mode() {
 }
 assert_safe_ancestors() {
   local path="$1" label="$2" probe="" remainder component last_existing="/"
+  local identity device inode owner mode links
   [[ "$path" == /* ]] || fail "$label must be an absolute path"
   case "$path/" in
     *'//'*) fail "$label is not lexically normalized" ;;
     *'/./'*|*'/../'*) fail "$label contains a relative path component" ;;
   esac
+  identity="$(stat_identity /)" || fail "cannot inspect $label ancestor: /"
+  IFS=: read -r device inode owner mode links <<<"$identity"
+  [[ ! -L / && -d / ]] || fail "$label root ancestor is unsafe"
+  [[ "$owner" == 0 || "$owner" == "$owner_uid" ]] \
+    || fail "$label traverses a foreign ancestor: /"
+  (( (8#$mode & 8#022) == 0 )) \
+    || fail "$label traverses a writable ancestor: /"
   remainder="${path#/}"
   while [[ -n "$remainder" ]]; do
     if [[ "$remainder" == */* ]]; then
@@ -86,6 +97,12 @@ assert_safe_ancestors() {
     [[ ! -L "$probe" ]] || fail "$label traverses a symlink: $probe"
     if [[ -e "$probe" ]]; then
       [[ -d "$probe" ]] || fail "$label traverses a non-directory: $probe"
+      identity="$(stat_identity "$probe")" || fail "cannot inspect $label ancestor: $probe"
+      IFS=: read -r device inode owner mode links <<<"$identity"
+      [[ "$owner" == 0 || "$owner" == "$owner_uid" ]] \
+        || fail "$label traverses a foreign ancestor: $probe"
+      (( (8#$mode & 8#022) == 0 )) \
+        || fail "$label traverses a writable ancestor: $probe"
       last_existing="$probe"
     else
       break
@@ -93,6 +110,13 @@ assert_safe_ancestors() {
   done
   assert_safe_dir "$last_existing" "$label ancestor"
 }
+assert_safe_ancestors "$HOME" "HOME"
+tmpdir=$(/usr/bin/mktemp -d "$HOME/.unified-kanban-hermes-bootstrap.XXXXXX") \
+  || fail "unable to create private temporary directory"
+assert_safe_dir "$tmpdir" "Hermes bootstrap temporary directory"
+require_mode "$tmpdir" "Hermes bootstrap temporary directory" 700
+installer="$tmpdir/install.sh"
+marker_snapshot="$tmpdir/bootstrap-marker"
 sha256_stream() {
   local output digest
   output=$(/usr/bin/shasum -a 256) || fail "unable to calculate SHA-256"
@@ -267,7 +291,7 @@ fi
 require_digest "$installer" "official installer" "$INSTALLER_SHA256"
 
 /usr/bin/env -i \
-  HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="${TMPDIR:-/tmp}" \
+  HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$tmpdir" \
   HERMES_AGENT_REPO="$AGENT_REPO" HERMES_HOME="$HERMES_HOME_ARG" \
   /bin/bash "$installer" \
     --commit "$UPSTREAM" --dir "$AGENT_REPO" --hermes-home "$HERMES_HOME_ARG" \
