@@ -83,6 +83,7 @@ AGENT_REPO="$(PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
   python3 -m kanban_adapter.release_layout "$AGENT_REPO")" || exit 1
 HERMES_RELEASE_ROOT="${AGENT_REPO}.releases"
 HERMES_RELEASE_SELECTOR="$HERMES_RELEASE_ROOT/current"
+HERMES_RELEASE_PREVIOUS="$HERMES_RELEASE_ROOT/previous"
 HERMES_LAUNCHER="$HOME/.local/bin/hermes"
 GATEWAY_PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
 STATE_DIR="$HERMES_HOME/state"
@@ -164,19 +165,32 @@ except FileNotFoundError:
     raise SystemExit(0)
 if not stat.S_ISREG(info.st_mode):
     raise SystemExit(f"Hermes release selector is not a regular file: {selector}")
+if (
+    info.st_nlink != 1
+    or info.st_uid != os.getuid()
+    or stat.S_IMODE(info.st_mode) != 0o600
+):
+    raise SystemExit(f"Hermes release selector is not a private regular file: {selector}")
 flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 descriptor = os.open(selector, flags)
 try:
     opened = os.fstat(descriptor)
-    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+    if (
+        (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+        or opened.st_nlink != 1
+        or opened.st_uid != os.getuid()
+        or stat.S_IMODE(opened.st_mode) != 0o600
+    ):
         raise SystemExit(f"Hermes release selector changed during read: {selector}")
     data = os.read(descriptor, 4096)
     if os.read(descriptor, 1):
         raise SystemExit(f"Hermes release selector is too large: {selector}")
 finally:
     os.close(descriptor)
+if not data.endswith(b"\n") or data.endswith(b"\n\n"):
+    raise SystemExit(f"Hermes release selector is not canonical: {selector}")
 try:
-    release = data.decode("utf-8").removesuffix("\n")
+    release = data[:-1].decode("utf-8")
 except UnicodeDecodeError:
     raise SystemExit(f"Hermes release selector is not UTF-8: {selector}")
 if (
@@ -568,8 +582,9 @@ trap 'exit 143' TERM
 python3 "$REPO_ROOT/scripts/update-state.py" ensure-dir directory "$STATE_DIR"
 acquire_lock
 
-# Re-read the selection under the lock: the pre-lock read only informed --check.
+# Re-read both durable references under the shared activation/GC lock.
 SELECTED_RELEASE="$(read_selected_release)"
+PREVIOUS_RELEASE="$(read_release_file "$HERMES_RELEASE_PREVIOUS")"
 
 read_pending_state
 PENDING_DASHBOARD=0
@@ -693,13 +708,26 @@ trap finish_update EXIT
 # non-skipped completion attempt. The trap only receives rollback authority
 # after both retained opening capabilities have been exported successfully.
 TRANSACTION_TOKEN="$(python3 "$REPO_ROOT/scripts/path-transaction.py" begin \
-  "$RECEIPT_PATH" "$HERMES_RELEASE_SELECTOR" "$GATEWAY_PLIST")"
+  "$RECEIPT_PATH" "$HERMES_RELEASE_SELECTOR" "$HERMES_RELEASE_PREVIOUS" \
+  "$GATEWAY_PLIST")"
 python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
   "$RECEIPT_PATH" "$HERMES_RELEASE_SELECTOR" "$PRIOR_SELECTOR"
 python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
   "$RECEIPT_PATH" "$GATEWAY_PLIST" "$PRIOR_GATEWAY_PLIST"
 TRANSACTION_RECEIPT="$RECEIPT_PATH"
 if ((ACTIVATION_REQUIRED)); then
+  # Publish rollback authority before moving current. A crash after current moves
+  # therefore cannot leave the prior known-good release undiscoverable.
+  if [[ -n "$SELECTED_RELEASE" && "$SELECTED_RELEASE" != "$TARGET_RELEASE" ]]; then
+    PREVIOUS_CANDIDATE="$TRANSACTION_DIR/hermes-release-previous"
+    python3 "$REPO_ROOT/scripts/hermes-release-manager.py" render-reference \
+      "$AGENT_REPO" "$SELECTED_RELEASE" "$PREVIOUS_CANDIDATE" >/dev/null
+    next_stage_receipt
+    python3 "$REPO_ROOT/scripts/path-transaction.py" replace-file \
+      "$TRANSACTION_RECEIPT" "$PREVIOUS_CANDIDATE" \
+      "$HERMES_RELEASE_PREVIOUS" "$STAGE_RECEIPT" --absent-mode 0600
+    checkpoint_stage
+  fi
   SELECTOR_CANDIDATE="$TRANSACTION_DIR/hermes-release-selector"
   python3 "$REPO_ROOT/scripts/hermes-release-manager.py" render-selector \
     "$AGENT_REPO" "$SUPPORTED_UPSTREAM" "$FINAL_CARRIED_COMMIT" \

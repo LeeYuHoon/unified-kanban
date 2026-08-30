@@ -9,6 +9,7 @@ import pytest
 
 from kanban_adapter.release_layout import (
     normalize_agent_repo,
+    previous_release_selector,
     release_directory,
     release_root,
     release_selector,
@@ -73,6 +74,7 @@ def test_release_root_is_the_sibling_a_shell_would_concatenate(value: str) -> No
 
     assert str(release_root(value)) == f"{repo}.releases"
     assert str(release_selector(value)) == f"{repo}.releases/current"
+    assert str(previous_release_selector(value)) == f"{repo}.releases/previous"
     assert str(release_directory(value, CARRIED)) == f"{repo}.releases/release-{CARRIED}"
     assert release_root(value) != repo
     assert repo not in release_root(value).parents

@@ -20,6 +20,7 @@ from pathlib import Path
 
 COMPLETION_RECEIPT_NAME = ".unified-kanban-release.json"
 SELECTOR_NAME = "current"
+PREVIOUS_SELECTOR_NAME = "previous"
 RELEASE_ROOT_SUFFIX = ".releases"
 _CARRIED_RE = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -53,6 +54,11 @@ def release_root(agent_repo: str | os.PathLike[str]) -> Path:
 def release_selector(agent_repo: str | os.PathLike[str]) -> Path:
     """Return the one regular file that names the release in use."""
     return release_root(agent_repo) / SELECTOR_NAME
+
+
+def previous_release_selector(agent_repo: str | os.PathLike[str]) -> Path:
+    """Return the durable regular-file reference to the prior known-good release."""
+    return release_root(agent_repo) / PREVIOUS_SELECTOR_NAME
 
 
 def release_directory(agent_repo: str | os.PathLike[str], carried: str) -> Path:

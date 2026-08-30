@@ -7,6 +7,7 @@ import importlib.util
 import json
 import marshal
 import os
+import plistlib
 import shlex
 import stat
 import subprocess
@@ -129,6 +130,27 @@ def build_incomplete_release(
     helper.build_source_release(layout, **build)
     assert not (layout.release / helper._COMPLETION_RECEIPT).exists()
     return layout, build
+
+
+def build_completed_release(helper, checkout: Path, work: Path):
+    work.mkdir()
+    source, bundle, upstream, carried = make_repositories(
+        work,
+        carried_entries=(("100644", "gc-fixture.txt", f"{work.name}\n"),),
+    )
+    layout = helper.release_layout(checkout, upstream, carried)
+    helper.build_source_release(
+        layout,
+        upstream=upstream,
+        carried=carried,
+        bundle=bundle,
+        source_url=str(source),
+        allow_local_source=True,
+    )
+    install_receiptable_launchers(layout.release)
+    helper._publish_bytecode_fingerprint(layout.release, carried)
+    helper._publish_completion_receipt(layout, upstream, carried)
+    return layout
 
 
 def temporary_release_names(layout) -> list[str]:
@@ -436,6 +458,964 @@ def test_build_refuses_existing_release(tmp_path: Path) -> None:
             bundle=tmp_path / "missing.bundle",
             source_url="https://github.com/NousResearch/hermes-agent.git",
         )
+
+
+def test_gc_dry_run_protects_explicit_current_and_previous_references(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    current = build_completed_release(helper, checkout, tmp_path / "current-work")
+    previous = build_completed_release(helper, checkout, tmp_path / "previous-work")
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    current.selector.write_bytes(helper.release_reference_payload(current.root, current.release))
+    current.selector.chmod(0o600)
+    previous_reference = current.root / "previous"
+    previous_reference.write_bytes(
+        helper.release_reference_payload(current.root, previous.release)
+    )
+    previous_reference.chmod(0o600)
+    before = sorted(path.name for path in current.root.iterdir())
+
+    plan = helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert plan == {
+        "candidates": [str(stale.release)],
+        "preserved": [],
+        "protected": sorted(
+            [
+                {"path": str(current.release), "reasons": ["current"]},
+                {"path": str(previous.release), "reasons": ["previous"]},
+            ],
+            key=lambda item: item["path"],
+        ),
+        "release_root": str(current.root),
+        "version": 1,
+    }
+    assert sorted(path.name for path in current.root.iterdir()) == before
+
+
+def test_gc_dry_run_protects_runtime_references(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    running = build_completed_release(helper, checkout, tmp_path / "running-work")
+
+    plan = helper.plan_release_gc(checkout, runtime_references={running.release})
+
+    assert plan["candidates"] == []
+    assert plan["protected"] == [
+        {"path": str(running.release), "reasons": ["runtime"]}
+    ]
+
+
+def test_gc_dry_run_preserves_tampered_foreign_and_unrecognized_entries(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    tampered = build_completed_release(helper, checkout, tmp_path / "tampered-work")
+    (tampered.release / "venv/bin/hermes").write_text(
+        "#!/bin/sh\necho tampered\n", encoding="utf-8"
+    )
+    foreign = tampered.root / f"release-{'a' * 40}"
+    foreign.mkdir()
+    unknown = tampered.root / "operator-notes"
+    unknown.mkdir()
+
+    plan = helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert plan["candidates"] == []
+    preserved = {Path(item["path"]).name: item["reason"] for item in plan["preserved"]}
+    assert preserved["operator-notes"] == "unrecognized"
+    assert preserved[foreign.name].startswith("unverified:")
+    assert preserved[tampered.release.name].startswith("unverified:")
+
+
+def test_gc_dry_run_rejects_a_malformed_durable_reference(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    release = build_completed_release(helper, checkout, tmp_path / "release-work")
+    release.selector.write_text("foreign\n", encoding="utf-8")
+    release.selector.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="does not name a managed release"):
+        helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert release.release.is_dir()
+
+
+def test_gc_collects_launchd_and_process_runtime_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+    plist_release = root / f"release-{'1' * 40}"
+    loaded_release = root / f"release-{'2' * 40}"
+    process_release = root / f"release-{'3' * 40}"
+    plist = tmp_path / "ai.hermes.gateway.plist"
+    plist.write_bytes(
+        plistlib.dumps(
+            {"ProgramArguments": [str(plist_release / "venv/bin/python"), "-m", "hermes_cli.main"]}
+        )
+    )
+    plist.chmod(0o600)
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/bin/launchctl", "print"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=f"program = {loaded_release}/venv/bin/python\n", stderr=""
+            )
+        if command == ["/bin/ps", "-axo", "pid=,uid=,state=,lstart=,command=", "-ww"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"123 {os.getuid()} S {process_release}/venv/bin/hermes gateway\n",
+                stderr="",
+            )
+        if command == ["/usr/sbin/lsof", "-n", "-P", "-u", str(os.getuid()), "-F", "pfn"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"p123\nfcwd\nn{process_release}/runtime.db\n",
+                stderr="",
+            )
+        raise AssertionError(command)
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+
+    assert helper.collect_runtime_references(root, plist) == {
+        plist_release,
+        loaded_release,
+        process_release,
+    }
+
+
+def test_gc_runtime_reference_probe_fails_closed_on_indeterminate_launchd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 77, stdout="", stderr="unavailable")
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="launchd reference probe"):
+        helper.collect_runtime_references(root, tmp_path / "missing.plist")
+
+
+def test_gc_apply_deletes_only_a_verified_unreferenced_release(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+
+    result = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=lambda: set(),
+        lock_verifier=lambda: None,
+    )
+
+    assert result == {"deleted": [str(stale.release)], "retained": []}
+    assert not stale.release.exists()
+    assert not any(path.name.startswith(".gc-retired-") for path in stale.root.iterdir())
+
+
+def test_gc_apply_restores_a_release_referenced_after_retirement(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    identity = stale.release.stat().st_ino
+    observations = iter((set(), {stale.release}))
+
+    result = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=lambda: next(observations),
+        lock_verifier=lambda: None,
+    )
+
+    assert result == {
+        "deleted": [],
+        "retained": [{"path": str(stale.release), "reason": "referenced-after-retirement"}],
+    }
+    assert stale.release.stat().st_ino == identity
+    assert not any(path.name.startswith(".gc-retired-") for path in stale.root.iterdir())
+
+
+def test_gc_apply_requires_the_shared_activation_lock(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+
+    with pytest.raises(RuntimeError, match="shared activation lock"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=None,
+        )
+
+
+def test_gc_apply_rechecks_lock_before_namespace_mutation(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    checks = 0
+
+    def verify_lock() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise RuntimeError("lock identity changed")
+
+    with pytest.raises(RuntimeError, match="lock identity changed"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=verify_lock,
+        )
+
+    assert stale.release.is_dir()
+    assert not any(path.name.startswith(".gc-retired-") for path in stale.root.iterdir())
+
+
+def test_gc_cli_defaults_to_deterministic_dry_run_without_lock_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    hermes_home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper, "collect_runtime_references", lambda root, plist: set())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout)],
+    )
+
+    assert helper.main() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["candidates"] == [str(stale.release)]
+    assert stale.release.is_dir()
+    assert not (hermes_home / "state").exists()
+
+
+def test_gc_cli_apply_respects_an_existing_updater_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    hermes_home = tmp_path / "hermes-home"
+    state = hermes_home / "state"
+    state.mkdir(parents=True, mode=0o700)
+    os.symlink("foreign-token", state / "hermes-kanban-update.lock")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper, "collect_runtime_references", lambda root, plist: set())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        helper.main()
+
+    assert stale.release.is_dir()
+    assert os.readlink(state / "hermes-kanban-update.lock") == "foreign-token"
+
+
+def test_gc_cli_apply_uses_and_releases_the_shared_updater_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    def collect_while_shared_lock_is_held(root: Path, plist: Path) -> set[Path]:
+        lock = hermes_home / "state/hermes-kanban-update.lock"
+        assert lock.is_symlink()
+        assert not (hermes_home / "state/update.lock").exists()
+        return set()
+
+    monkeypatch.setattr(
+        helper, "collect_runtime_references", collect_while_shared_lock_is_held
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    assert helper.main() == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "deleted": [str(stale.release)],
+        "retained": [],
+    }
+    assert not stale.release.exists()
+    assert not (hermes_home / "state/hermes-kanban-update.lock").exists()
+
+
+def test_gc_apply_never_restores_a_partially_deleted_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+
+    original_rmtree = helper.shutil.rmtree
+
+    def fail_after_partial_delete(retirement: str, *, dir_fd: int) -> None:
+        os.unlink(f"{retirement}/venv/bin/hermes", dir_fd=dir_fd)
+        raise OSError("injected partial delete failure")
+
+    monkeypatch.setattr(helper.shutil, "rmtree", fail_after_partial_delete)
+
+    with pytest.raises(OSError, match="partial delete failure"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert not stale.release.exists()
+    retired = [
+        path
+        for path in stale.root.iterdir()
+        if path.name.startswith(".gc-retired-") and path.is_dir()
+    ]
+    records = list(stale.root.glob(".gc-retired-*.record"))
+    assert len(retired) == 1
+    assert len(records) == 1
+    assert not (retired[0] / "venv/bin/hermes").exists()
+
+    monkeypatch.setattr(helper.shutil, "rmtree", original_rmtree)
+    resumed = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=lambda: set(),
+        lock_verifier=lambda: None,
+    )
+
+    assert resumed == {"deleted": [str(stale.release)], "retained": []}
+    assert not retired[0].exists()
+    assert not records[0].exists()
+
+
+def test_gc_apply_validates_release_root_before_resuming_retirements(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    checkout = linked_parent / "hermes-agent"
+    checkout.mkdir()
+    root = checkout.with_name(f"{checkout.name}.releases")
+    root.mkdir(mode=0o700)
+    release = root / f"release-{'4' * 40}"
+    retirement = root / f".gc-retired-{'4' * 40}-{'5' * 32}"
+    retirement.mkdir(mode=0o700)
+    (retirement / "owned-data").write_text("preserve\n", encoding="utf-8")
+    info = retirement.stat()
+    record = retirement.with_name(f"{retirement.name}.record")
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            release, retirement, (info.st_dev, info.st_ino)
+        )
+    )
+    record.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="symlinked ancestor"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert retirement.is_dir()
+    assert record.is_file()
+    assert (retirement / "owned-data").read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_gc_apply_preserves_a_malformed_foreign_retirement_record(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    root = checkout.with_name(f"{checkout.name}.releases")
+    root.mkdir(mode=0o700)
+    record = root / f".gc-retired-{'5' * 40}-{'6' * 32}.record"
+    record.write_text("foreign\n", encoding="utf-8")
+    record.chmod(0o600)
+
+    result = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=lambda: set(),
+        lock_verifier=lambda: None,
+    )
+
+    assert result["deleted"] == []
+    assert result["retained"] == [
+        {"path": str(record), "reason": "unverified-record: GC retirement record is invalid"}
+    ]
+    assert record.read_text(encoding="utf-8") == "foreign\n"
+
+
+def test_gc_apply_restores_after_post_retirement_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    identity = stale.release.stat().st_ino
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def fail_second_directory_fsync(capability, *, allow_moved: bool = False) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected post-retirement fsync failure")
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_second_directory_fsync)
+
+    with pytest.raises(OSError, match="post-retirement fsync failure"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert stale.release.stat().st_ino == identity
+    assert not list(stale.root.glob(".gc-retired-*"))
+
+
+def test_gc_dry_run_preserves_release_with_public_completion_receipt(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    (stale.release / helper._COMPLETION_RECEIPT).chmod(0o666)
+    plan = helper.plan_release_gc(checkout, runtime_references=set())
+    assert stale.release not in plan["candidates"]
+    assert any(item["path"] == str(stale.release) for item in plan["preserved"])
+
+
+def test_gc_dry_run_preserves_release_with_foreign_leaf_metadata(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    release = build_completed_release(helper, checkout, tmp_path / "release-work")
+    release.release.chmod(0o755)
+
+    plan = helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert plan["candidates"] == []
+    assert plan["preserved"] == [
+        {
+            "path": str(release.release),
+            "reason": "unverified: release directory is not owner-only",
+        }
+    ]
+    assert release.release.is_dir()
+
+
+def test_gc_dry_run_preserves_symlinked_incomplete_and_hardlinked_receipts(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    hardlinked = build_completed_release(helper, checkout, tmp_path / "hardlink-work")
+    receipt = hardlinked.release / helper._COMPLETION_RECEIPT
+    receipt_copy = tmp_path / "receipt-copy"
+    receipt_copy.write_bytes(receipt.read_bytes())
+    receipt_copy.chmod(0o600)
+    receipt.unlink()
+    os.link(receipt_copy, receipt)
+    incomplete = hardlinked.root / f"release-{'8' * 40}"
+    incomplete.mkdir()
+    outside = tmp_path / "outside-release"
+    outside.mkdir()
+    symlinked = hardlinked.root / f"release-{'9' * 40}"
+    symlinked.symlink_to(outside, target_is_directory=True)
+
+    plan = helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert plan["candidates"] == []
+    preserved = {Path(item["path"]).name for item in plan["preserved"]}
+    assert {hardlinked.release.name, incomplete.name, symlinked.name} <= preserved
+    assert symlinked.is_symlink()
+    assert receipt.stat().st_nlink == 2
+
+
+def test_gc_collects_runtime_references_from_open_files_and_working_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+    open_release = root / f"release-{'4' * 40}"
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/bin/launchctl", "print"]:
+            uid = os.getuid()
+            return subprocess.CompletedProcess(
+                command,
+                113,
+                stdout="",
+                stderr=(
+                    "Bad request.\nCould not find service "
+                    f'"ai.hermes.gateway" in domain for user gui: {uid}\n'
+                ),
+            )
+        if command == ["/bin/ps", "-axo", "pid=,uid=,state=,lstart=,command=", "-ww"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"123 {os.getuid()} S python3 gateway\n", stderr="")
+        if command == ["/usr/sbin/lsof", "-n", "-P", "-u", str(os.getuid()), "-F", "pfn"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=f"p123\nfcwd\nn{open_release}/runtime.db\n", stderr=""
+            )
+        raise AssertionError(command)
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+
+    assert helper.collect_runtime_references(root, tmp_path / "missing.plist") == {
+        open_release
+    }
+
+
+def test_gc_runtime_reference_probe_fails_closed_on_indeterminate_open_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/bin/launchctl", "print"]:
+            uid = os.getuid()
+            return subprocess.CompletedProcess(
+                command,
+                113,
+                stdout="",
+                stderr=(
+                    "Bad request.\nCould not find service "
+                    f'"ai.hermes.gateway" in domain for user gui: {uid}\n'
+                ),
+            )
+        if command == ["/bin/ps", "-axo", "pid=,uid=,state=,lstart=,command=", "-ww"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"123 {os.getuid()} S python3 gateway\n", stderr="")
+        return subprocess.CompletedProcess(command, 77, stdout="", stderr="unavailable")
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="open-file reference probe"):
+        helper.collect_runtime_references(root, tmp_path / "missing.plist")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        ("", ""),
+        ("not-a-field-record\n", ""),
+        ("p123\n", ""),
+        ("p123\nf1\n", ""),
+        ("p123\nfcwd\nn/tmp/runtime.db\n", "lsof: partial result\n"),
+    ],
+)
+def test_gc_runtime_reference_probe_rejects_successful_incomplete_open_file_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    stderr: str,
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/bin/launchctl", "print"]:
+            uid = os.getuid()
+            return subprocess.CompletedProcess(
+                command,
+                113,
+                stdout="",
+                stderr=(
+                    "Bad request.\nCould not find service "
+                    f'"ai.hermes.gateway" in domain for user gui: {uid}\n'
+                ),
+            )
+        if command[:2] == ["/bin/ps", "-axo"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"123 {os.getuid()} S python3 gateway\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="open-file reference probe"):
+        helper.collect_runtime_references(root, tmp_path / "missing.plist")
+
+
+def test_gc_runtime_reference_probe_fails_closed_on_indeterminate_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/bin/launchctl", "print"]:
+            uid = os.getuid()
+            return subprocess.CompletedProcess(
+                command,
+                113,
+                stdout="",
+                stderr=(
+                    "Bad request.\nCould not find service "
+                    f'"ai.hermes.gateway" in domain for user gui: {uid}\n'
+                ),
+            )
+        return subprocess.CompletedProcess(command, 77, stdout="", stderr="unavailable")
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="process reference probe"):
+        helper.collect_runtime_references(root, tmp_path / "missing.plist")
+
+
+def test_gc_apply_reverifies_each_candidate_at_its_canonical_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_plan = helper.plan_release_gc
+
+    def tampering_plan(*args, **kwargs):
+        plan = original_plan(*args, **kwargs)
+        (stale.release / "venv/bin/hermes").write_text(
+            "#!/bin/sh\necho changed\n", encoding="utf-8"
+        )
+        return plan
+
+    monkeypatch.setattr(helper, "plan_release_gc", tampering_plan)
+
+    with pytest.raises(RuntimeError, match="inventory|fingerprint|digest|does not match content"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert stale.release.is_dir()
+    assert not any(path.name.startswith(".gc-retired-") for path in stale.root.iterdir())
+
+
+def test_gc_apply_preserves_a_foreign_canonical_successor_and_owned_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_rename = helper._rename_exclusive_at
+    successor_identity = None
+
+    def inject_successor(directory_fd: int, source: str, destination: str) -> None:
+        nonlocal successor_identity
+        original_rename(directory_fd, source, destination)
+        if source == stale.release.name and destination.startswith(".gc-retired-"):
+            os.mkdir(source, dir_fd=directory_fd)
+            successor_identity = os.stat(source, dir_fd=directory_fd).st_ino
+
+    monkeypatch.setattr(helper, "_rename_exclusive_at", inject_successor)
+
+    with pytest.raises(RuntimeError, match="foreign canonical successor"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert stale.release.stat().st_ino == successor_identity
+    retired = [
+        path
+        for path in stale.root.iterdir()
+        if path.name.startswith(".gc-retired-") and path.is_dir()
+    ]
+    records = list(stale.root.glob(".gc-retired-*.record"))
+    assert len(retired) == 1
+    assert len(records) == 1
+    assert (retired[0] / helper._COMPLETION_RECEIPT).is_file()
+
+
+def test_gc_dry_run_rejects_a_writable_release_root_ancestor(tmp_path: Path) -> None:
+    helper = load_helper()
+    unsafe_parent = tmp_path / "unsafe-parent"
+    unsafe_parent.mkdir(mode=0o700)
+    unsafe_parent.chmod(0o777)
+    checkout = unsafe_parent / "hermes-agent"
+    checkout.mkdir()
+    root = checkout.with_name(f"{checkout.name}.releases")
+    root.mkdir(mode=0o700)
+
+    with pytest.raises(RuntimeError, match="untrusted writable ancestor"):
+        helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert root.is_dir()
+
+
+def test_gc_dry_run_rejects_a_symlinked_release_root_ancestor(tmp_path: Path) -> None:
+    helper = load_helper()
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    checkout = linked_parent / "hermes-agent"
+    checkout.mkdir()
+    release = build_completed_release(helper, checkout, tmp_path / "release-work")
+
+    with pytest.raises(RuntimeError, match="symlinked ancestor"):
+        helper.plan_release_gc(checkout, runtime_references=set())
+
+    assert release.release.is_dir()
+
+
+def test_gc_runtime_reference_probe_accepts_bare_names_and_ignores_exited_pids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+    ps_calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal ps_calls
+        if command[:2] == ["/bin/launchctl", "print"]:
+            uid = os.getuid()
+            return subprocess.CompletedProcess(command, 113, stdout="", stderr=("Bad request.\nCould not find service " f'"ai.hermes.gateway" in domain for user gui: {uid}\n'))
+        if command[:2] == ["/bin/ps", "-axo"]:
+            ps_calls += 1
+            extra = f"124 {os.getuid()} S short-lived\n" if ps_calls == 1 else ""
+            return subprocess.CompletedProcess(command, 0, stdout=f"123 {os.getuid()} S gateway\n{extra}", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="p123\nf1\nn\n", stderr="")
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+    assert helper.collect_runtime_references(root, tmp_path / "missing.plist") == set()
+    assert ps_calls >= 2
+    assert ps_calls % 2 == 0
+
+
+def test_gc_runtime_reference_probe_retries_pid_reuse_until_identity_converges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+    release = root / f"release-{'9' * 40}"
+    ps_outputs = iter(
+        [
+            f"123 {os.getuid()} S Fri Aug 30 09:00:00 2026 old-process\n",
+            f"123 {os.getuid()} S Fri Aug 30 09:00:01 2026 new-process\n",
+            f"123 {os.getuid()} S Fri Aug 30 09:00:01 2026 new-process\n",
+            f"123 {os.getuid()} S Fri Aug 30 09:00:01 2026 new-process\n",
+        ]
+    )
+    lsof_calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal lsof_calls
+        if command[:2] == ["/bin/launchctl", "print"]:
+            uid = os.getuid()
+            return subprocess.CompletedProcess(command, 113, stdout="", stderr=("Bad request.\nCould not find service " f'"ai.hermes.gateway" in domain for user gui: {uid}\n'))
+        if command[:2] == ["/bin/ps", "-axo"]:
+            return subprocess.CompletedProcess(command, 0, stdout=next(ps_outputs), stderr="")
+        lsof_calls += 1
+        name = "/tmp/old.db" if lsof_calls == 1 else str(release / "runtime.db")
+        return subprocess.CompletedProcess(command, 0, stdout=f"p123\nf1\nn{name}\n", stderr="")
+
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+    assert helper.collect_runtime_references(root, tmp_path / "missing.plist") == {release}
+    assert lsof_calls == 2
+
+
+def test_gc_apply_creates_retirement_record_only_in_retained_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    displaced = tmp_path / "displaced-root-before-record"
+    original_write = helper._write_private_candidate_at
+    displaced_once = False
+
+    def displace_before_record(capability, name, payload, mode):
+        nonlocal displaced_once
+        if not displaced_once:
+            displaced_once = True
+            stale.root.rename(displaced)
+            stale.root.mkdir(mode=0o700)
+        return original_write(capability, name, payload, mode)
+
+    monkeypatch.setattr(helper, "_write_private_candidate_at", displace_before_record)
+    with pytest.raises(RuntimeError, match="release root.*moved"):
+        helper.apply_release_gc(checkout, runtime_reference_supplier=lambda: set(), lock_verifier=lambda: None)
+
+    assert list(stale.root.iterdir()) == []
+    assert (displaced / stale.release.name).is_dir()
+    assert not list(displaced.glob(".gc-retired-*.record"))
+
+
+def test_gc_apply_binds_plan_to_the_retained_release_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    original = build_completed_release(helper, checkout, tmp_path / "original-work")
+    foreign_root = tmp_path / "foreign-root"
+    foreign_root.mkdir(mode=0o700)
+    foreign_release = foreign_root / original.release.name
+    helper.shutil.copytree(original.release, foreign_release, symlinks=True)
+    foreign_release.chmod(0o700)
+    displaced = tmp_path / "displaced-original-root"
+    original_plan = helper.plan_release_gc
+
+    def replace_root_after_planning(*args, **kwargs):
+        plan = original_plan(*args, **kwargs)
+        original.root.rename(displaced)
+        foreign_root.rename(original.root)
+        return plan
+
+    monkeypatch.setattr(helper, "plan_release_gc", replace_root_after_planning)
+    with pytest.raises(RuntimeError, match="release root.*moved|release root.*changed"):
+        helper.apply_release_gc(checkout, runtime_reference_supplier=lambda: set(), lock_verifier=lambda: None)
+    assert (displaced / original.release.name).is_dir()
+    assert (original.root / foreign_release.name).is_dir()
+
+
+def test_gc_apply_protects_post_retirement_open_file_alias(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    calls = 0
+
+    def runtime_references() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        retirements = [
+            path
+            for path in stale.root.glob(".gc-retired-*")
+            if not path.name.endswith(".record")
+        ]
+        if not retirements:
+            return set()
+        return helper._release_references_in_text(stale.root, str(retirements[0] / "runtime.db"))
+
+    result = helper.apply_release_gc(checkout, runtime_reference_supplier=runtime_references, lock_verifier=lambda: None)
+    assert result["deleted"] == []
+    assert stale.release.is_dir()
+    assert calls >= 2
+
+
+def test_gc_apply_rechecks_lock_immediately_before_retirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    lock_valid = True
+    renamed = False
+    original_write = helper._write_private_candidate_at
+    original_rename = helper._rename_exclusive_at
+
+    def invalidate_after_record(*args, **kwargs):
+        nonlocal lock_valid
+        result = original_write(*args, **kwargs)
+        lock_valid = False
+        return result
+
+    def observe_rename(*args, **kwargs):
+        nonlocal renamed
+        renamed = True
+        return original_rename(*args, **kwargs)
+
+    def verify_lock() -> None:
+        if not lock_valid:
+            raise RuntimeError("injected lock identity change")
+
+    monkeypatch.setattr(helper, "_write_private_candidate_at", invalidate_after_record)
+    monkeypatch.setattr(helper, "_rename_exclusive_at", observe_rename)
+    with pytest.raises(RuntimeError, match="lock identity change"):
+        helper.apply_release_gc(checkout, runtime_reference_supplier=lambda: set(), lock_verifier=verify_lock)
+    assert not renamed
+    assert stale.release.is_dir()
+
+
+def test_gc_apply_retains_root_authority_if_namespace_is_displaced_after_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    root = stale.root
+    displaced = tmp_path / "displaced-release-root"
+    identity = stale.release.stat().st_ino
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def displace_root_during_post_retirement_fsync(
+        capability, *, allow_moved: bool = False
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(
+        helper, "_fsync_gc_root", displace_root_during_post_retirement_fsync
+    )
+
+    with pytest.raises(RuntimeError, match="release root.*changed|release root.*moved"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    restored = displaced / stale.release.name
+    assert restored.stat().st_ino == identity
+    assert not list(displaced.glob(".gc-retired-*"))
+    assert list(root.iterdir()) == []
 
 
 def test_selector_payload_names_exact_absolute_release(tmp_path: Path) -> None:

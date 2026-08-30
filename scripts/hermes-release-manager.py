@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
 import marshal
 import os
+import plistlib
 import re
 import secrets
 import shlex
@@ -22,7 +24,7 @@ import tempfile
 import types
 import unicodedata
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, TypedDict
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
@@ -419,11 +421,47 @@ def _rename_exclusive(source: Path, destination: Path) -> None:
         raise OSError(code, os.strerror(code), str(destination))
 
 
+def _rename_exclusive_at(directory_fd: int, source: str, destination: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameatx_np = getattr(libc, "renameatx_np", None)
+    if renameatx_np is None:
+        raise RuntimeError("descriptor-relative GC retirement requires macOS renameatx_np")
+    renameatx_np.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameatx_np.restype = ctypes.c_int
+    result = renameatx_np(
+        directory_fd,
+        os.fsencode(source),
+        directory_fd,
+        os.fsencode(destination),
+        _RENAME_EXCL,
+    )
+    if result != 0:
+        value = ctypes.get_errno()
+        raise OSError(value, os.strerror(value), destination)
+
+
+def release_reference_payload(root: Path, release: Path) -> bytes:
+    """Return one canonical release reference suitable for durable publication."""
+    if (
+        not release.is_absolute()
+        or release.parent != root
+        or re.fullmatch(r"release-[0-9a-f]{40}", release.name) is None
+    ):
+        raise ValueError("release reference must name an exact release in the managed root")
+    return f"{release}\n".encode("utf-8")
+
+
 def selector_payload(layout: ReleaseLayout) -> bytes:
     """Return the regular-file selector payload for path-transaction publication."""
     if not layout.release.is_dir() or layout.release.is_symlink():
         raise RuntimeError("release must be a real directory before selection")
-    return f"{layout.release}\n".encode("utf-8")
+    return release_reference_payload(layout.root, layout.release)
 
 
 def baseline_token(path: Path | None) -> str:
@@ -1155,6 +1193,731 @@ def selected_release(layout: ReleaseLayout) -> str | None:
         raise RuntimeError("release selector is not UTF-8") from exc
 
 
+def _read_release_reference(path: Path, root: Path) -> Path | None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise RuntimeError(f"release reference is not a private regular file: {path}")
+    data = _stable_regular_bytes(path)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError as exc:
+        raise RuntimeError(f"release reference is not UTF-8: {path}") from exc
+    if not text.endswith("\n") or text.endswith("\n\n"):
+        raise RuntimeError(f"release reference is not canonical: {path}")
+    value = text[:-1]
+    release = Path(value)
+    if (
+        "\n" in value
+        or not release.is_absolute()
+        or release.parent != root
+        or re.fullmatch(r"release-[0-9a-f]{40}", release.name) is None
+    ):
+        raise RuntimeError(f"release reference does not name a managed release: {path}")
+    return release
+
+
+def _verify_gc_release(
+    agent_repo: Path, release: Path, *, canonical_name: str | None = None
+) -> None:
+    canonical_name = release.name if canonical_name is None else canonical_name
+    if re.fullmatch(r"release-[0-9a-f]{40}", canonical_name) is None:
+        raise RuntimeError("release path does not have a canonical identity")
+    release_info = os.lstat(release)
+    if (
+        not stat.S_ISDIR(release_info.st_mode)
+        or stat.S_ISLNK(release_info.st_mode)
+        or release_info.st_uid != os.getuid()
+        or stat.S_IMODE(release_info.st_mode) != 0o700
+    ):
+        raise RuntimeError("release directory is not owner-only")
+    carried = canonical_name.removeprefix("release-")
+    receipt = release / _COMPLETION_RECEIPT
+    try:
+        observed = json.loads(_stable_regular_bytes(receipt))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("release completion receipt is invalid") from exc
+    if not isinstance(observed, dict):
+        raise RuntimeError("release completion receipt is invalid")
+    upstream = observed.get("upstream")
+    if not isinstance(upstream, str) or observed.get("carried") != carried:
+        raise RuntimeError("release completion receipt identity is invalid")
+    expected = release_layout(agent_repo, upstream, carried)
+    if expected.release.name != canonical_name or expected.root != release.parent:
+        raise RuntimeError("release path does not match its completion receipt")
+    layout = ReleaseLayout(expected.root, release, expected.selector)
+    _verify_completed_release(layout, upstream, carried)
+
+
+def _release_references_in_text(root: Path, text: str) -> set[Path]:
+    pattern = re.compile(
+        rf"{re.escape(str(root))}/"
+        r"(?:release-([0-9a-f]{40})|\.gc-retired-([0-9a-f]{40})-[0-9a-f]{32})"
+        r"(?=/|[\s'\"]|$)"
+    )
+    return {root / f"release-{match.group(1) or match.group(2)}" for match in pattern.finditer(text)}
+
+
+def collect_runtime_references(root: Path, launchd_plist: Path) -> set[Path]:
+    """Collect canonical, loaded-launchd, and process references fail closed."""
+    references: set[Path] = set()
+    try:
+        plist_info = os.lstat(launchd_plist)
+    except FileNotFoundError:
+        plist_info = None
+    if plist_info is not None:
+        if (
+            not stat.S_ISREG(plist_info.st_mode)
+            or plist_info.st_nlink != 1
+            or plist_info.st_uid != os.getuid()
+            or stat.S_IMODE(plist_info.st_mode) & 0o022
+        ):
+            raise RuntimeError("launchd plist is not a private regular file")
+        try:
+            payload = plistlib.loads(_stable_regular_bytes(launchd_plist))
+        except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+            raise RuntimeError("launchd plist is invalid") from exc
+        references.update(_release_references_in_text(root, repr(payload)))
+
+    uid = os.getuid()
+    domain = f"gui/{uid}/ai.hermes.gateway"
+    loaded = subprocess.run(
+        ["/bin/launchctl", "print", domain],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if loaded.returncode == 0:
+        references.update(_release_references_in_text(root, loaded.stdout))
+    else:
+        expected = (
+            "Bad request.\nCould not find service "
+            f'"ai.hermes.gateway" in domain for user gui: {uid}'
+        )
+        if loaded.returncode != 113 or loaded.stderr.rstrip("\n") != expected:
+            raise RuntimeError("launchd reference probe was indeterminate")
+
+    ps_command = [
+        "/bin/ps",
+        "-axo",
+        "pid=,uid=,state=,lstart=,command=",
+        "-ww",
+    ]
+
+    def live_process_identities(output: str) -> dict[int, str]:
+        live: dict[int, str] = {}
+        try:
+            for line in output.splitlines():
+                fields = line.split(None, 3)
+                if len(fields) != 4:
+                    raise ValueError("malformed ps record")
+                pid, process_uid = int(fields[0]), int(fields[1])
+                if process_uid == uid and not fields[2].startswith("Z"):
+                    if pid in live:
+                        raise ValueError("duplicate ps process record")
+                    live[pid] = fields[3]
+        except ValueError as exc:
+            raise RuntimeError("process reference probe was indeterminate") from exc
+        if not live:
+            raise RuntimeError("process reference probe was indeterminate")
+        return live
+
+    for _attempt in range(5):
+        before = subprocess.run(
+            ps_command, check=False, capture_output=True, text=True
+        )
+        if before.returncode != 0 or before.stderr:
+            raise RuntimeError("process reference probe was indeterminate")
+        before_identities = live_process_identities(before.stdout)
+
+        open_files = subprocess.run(
+            ["/usr/sbin/lsof", "-n", "-P", "-u", str(uid), "-F", "pfn"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        lines = open_files.stdout.splitlines()
+        if open_files.returncode != 0 or open_files.stderr or not lines:
+            raise RuntimeError("open-file reference probe was indeterminate")
+        lsof_pids: set[int] = set()
+        completed_pids: set[int] = set()
+        current_pid: int | None = None
+        current_file = False
+        current_file_named = False
+        try:
+            for line in lines:
+                if re.fullmatch(r"p[0-9]+", line):
+                    if current_file and not current_file_named:
+                        raise ValueError("file record is missing its name field")
+                    current_pid = int(line[1:])
+                    lsof_pids.add(current_pid)
+                    current_file = False
+                    current_file_named = False
+                elif line.startswith("f") and len(line) > 1:
+                    if current_pid is None or (current_file and not current_file_named):
+                        raise ValueError("orphan or incomplete file record")
+                    current_file = True
+                    current_file_named = False
+                elif line.startswith("n"):
+                    if current_pid is None or not current_file or current_file_named:
+                        raise ValueError("orphan name field")
+                    current_file_named = True
+                    completed_pids.add(current_pid)
+                else:
+                    raise ValueError("malformed lsof field record")
+            if current_file and not current_file_named:
+                raise ValueError("file record is missing its name field")
+        except ValueError as exc:
+            raise RuntimeError("open-file reference probe was indeterminate") from exc
+
+        after = subprocess.run(
+            ps_command, check=False, capture_output=True, text=True
+        )
+        if after.returncode != 0 or after.stderr:
+            raise RuntimeError("process reference probe was indeterminate")
+        after_identities = live_process_identities(after.stdout)
+        if before_identities != after_identities:
+            continue
+        stable_pids = set(after_identities)
+        if not stable_pids.issubset(lsof_pids & completed_pids):
+            continue
+        references.update(_release_references_in_text(root, before.stdout))
+        references.update(_release_references_in_text(root, open_files.stdout))
+        references.update(_release_references_in_text(root, after.stdout))
+        break
+    else:
+        raise RuntimeError("open-file reference probe was indeterminate")
+
+    return references
+
+
+class _GcProtected(TypedDict):
+    path: str
+    reasons: list[str]
+
+
+class _GcPreserved(TypedDict):
+    path: str
+    reason: str
+
+
+class GcPlan(TypedDict):
+    candidates: list[str]
+    preserved: list[_GcPreserved]
+    protected: list[_GcProtected]
+    release_root: str
+    version: int
+
+
+def _validate_real_directory_ancestry(path: Path) -> None:
+    if not path.is_absolute():
+        raise RuntimeError("release root must be absolute")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            raise RuntimeError(f"release root has a symlinked ancestor: {current}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(f"release root ancestor is not a directory: {current}")
+        if info.st_uid not in {0, os.getuid()} or stat.S_IMODE(info.st_mode) & 0o022:
+            raise RuntimeError(f"release root has an untrusted writable ancestor: {current}")
+
+
+def plan_release_gc(
+    agent_repo: Path, *, runtime_references: set[Path]
+) -> GcPlan:
+    """Return a deterministic no-write plan for verified immutable releases."""
+    root = release_root(agent_repo)
+    _validate_real_directory_ancestry(root)
+    root_info = os.lstat(root)
+    if (
+        not stat.S_ISDIR(root_info.st_mode)
+        or stat.S_ISLNK(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_IMODE(root_info.st_mode) != 0o700
+    ):
+        raise RuntimeError("release root must be an owner-only real directory")
+    references: dict[Path, list[str]] = {}
+    for name, reason in (("current", "current"), ("previous", "previous")):
+        release = _read_release_reference(root / name, root)
+        if release is not None:
+            references.setdefault(release, []).append(reason)
+    for release in runtime_references:
+        if (
+            release.is_absolute()
+            and release.parent == root
+            and re.fullmatch(r"release-[0-9a-f]{40}", release.name) is not None
+        ):
+            references.setdefault(release, []).append("runtime")
+
+    candidates: list[str] = []
+    protected: list[_GcProtected] = []
+    preserved: list[_GcPreserved] = []
+    infrastructure = {"current", "previous", "lazy-packages"}
+    for entry in sorted(root.iterdir(), key=lambda value: value.name):
+        if entry.name in infrastructure:
+            continue
+        if re.fullmatch(r"release-[0-9a-f]{40}", entry.name) is None:
+            preserved.append({"path": str(entry), "reason": "unrecognized"})
+            continue
+        try:
+            if not entry.is_dir() or entry.is_symlink():
+                raise RuntimeError("release is not a real directory")
+            _verify_gc_release(Path(agent_repo), entry)
+        except (OSError, RuntimeError, ValueError) as exc:
+            preserved.append({"path": str(entry), "reason": f"unverified: {exc}"})
+            continue
+        reasons = sorted(set(references.get(entry, [])))
+        if reasons:
+            protected.append({"path": str(entry), "reasons": reasons})
+        else:
+            candidates.append(str(entry))
+    return {
+        "candidates": sorted(candidates),
+        "preserved": sorted(preserved, key=lambda item: item["path"]),
+        "protected": sorted(protected, key=lambda item: item["path"]),
+        "release_root": str(root),
+        "version": 1,
+    }
+
+
+def _gc_reference_map(
+    root: Path, runtime_references: set[Path]
+) -> dict[Path, list[str]]:
+    references: dict[Path, list[str]] = {}
+    for name, reason in (("current", "current"), ("previous", "previous")):
+        release = _read_release_reference(root / name, root)
+        if release is not None:
+            references.setdefault(release, []).append(reason)
+    for release in runtime_references:
+        if (
+            release.is_absolute()
+            and release.parent == root
+            and re.fullmatch(r"release-[0-9a-f]{40}", release.name) is not None
+        ):
+            references.setdefault(release, []).append("runtime")
+    return references
+
+
+class _GcRootCapability(NamedTuple):
+    descriptor: int
+    identity: tuple[int, int]
+    original_path: Path
+
+
+def _open_gc_root(root: Path) -> _GcRootCapability:
+    _validate_real_directory_ancestry(root)
+    before = os.lstat(root)
+    descriptor = os.open(
+        root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o700
+        ):
+            raise RuntimeError("release root changed while retaining authority")
+        return _GcRootCapability(
+            descriptor, (opened.st_dev, opened.st_ino), Path(root)
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _gc_root_path(
+    capability: _GcRootCapability, *, allow_moved: bool = False
+) -> Path:
+    raw = fcntl.fcntl(capability.descriptor, 50, b"\0" * 1024)
+    encoded = raw.split(b"\0", 1)[0]
+    if not encoded:
+        raise RuntimeError("release root capability has no filesystem path")
+    current = Path(os.fsdecode(encoded))
+    opened = os.fstat(capability.descriptor)
+    observed = os.lstat(current)
+    if (
+        (opened.st_dev, opened.st_ino) != capability.identity
+        or (observed.st_dev, observed.st_ino) != capability.identity
+    ):
+        raise RuntimeError("release root capability identity changed")
+    if not allow_moved and current != capability.original_path:
+        raise RuntimeError("release root moved during GC")
+    return current
+
+
+def _fsync_gc_root(
+    capability: _GcRootCapability, *, allow_moved: bool = False
+) -> None:
+    os.fsync(capability.descriptor)
+    _gc_root_path(capability, allow_moved=allow_moved)
+
+
+def _restore_retired_release(
+    capability: _GcRootCapability,
+    retirement_name: str,
+    release_name: str,
+    identity: tuple[int, int],
+) -> None:
+    try:
+        successor = os.stat(
+            release_name, dir_fd=capability.descriptor, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        successor = None
+    if successor is not None:
+        root = _gc_root_path(capability, allow_moved=True)
+        raise RuntimeError(
+            "foreign canonical successor prevents GC restoration; "
+            f"retained {root / retirement_name}"
+        )
+    observed = os.stat(
+        retirement_name, dir_fd=capability.descriptor, follow_symlinks=False
+    )
+    if (observed.st_dev, observed.st_ino) != identity:
+        raise RuntimeError("retired release identity changed before restoration")
+    _rename_exclusive_at(capability.descriptor, retirement_name, release_name)
+    _fsync_gc_root(capability, allow_moved=True)
+
+
+def _gc_retirement_record_payload(
+    release: Path, retirement: Path, identity: tuple[int, int]
+) -> bytes:
+    return (
+        json.dumps(
+            {
+                "canonical": str(release),
+                "identity": [identity[0], identity[1]],
+                "retirement": str(retirement),
+                "version": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _read_gc_retirement_record(
+    root: Path, record: Path
+) -> tuple[Path, Path, tuple[int, int]]:
+    info = os.lstat(record)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise RuntimeError("GC retirement record is not a private regular file")
+    match = re.fullmatch(
+        r"(\.gc-retired-([0-9a-f]{40})-[0-9a-f]{32})\.record", record.name
+    )
+    if match is None:
+        raise RuntimeError("GC retirement record name is invalid")
+    data = _stable_regular_bytes(record)
+    try:
+        payload = json.loads(data)
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("GC retirement record is invalid") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "canonical",
+        "identity",
+        "retirement",
+        "version",
+    }:
+        raise RuntimeError("GC retirement record schema is invalid")
+    release = root / f"release-{match.group(2)}"
+    retirement = root / match.group(1)
+    identity_value = payload.get("identity")
+    if (
+        payload.get("version") != 1
+        or payload.get("canonical") != str(release)
+        or payload.get("retirement") != str(retirement)
+        or not isinstance(identity_value, list)
+        or len(identity_value) != 2
+        or any(not isinstance(value, int) for value in identity_value)
+    ):
+        raise RuntimeError("GC retirement record identity is invalid")
+    identity = (identity_value[0], identity_value[1])
+    if data != _gc_retirement_record_payload(release, retirement, identity):
+        raise RuntimeError("GC retirement record is not canonical")
+    return release, retirement, identity
+
+
+def _write_private_candidate_at(
+    capability: _GcRootCapability,
+    name: str,
+    payload: bytes,
+    mode: int,
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, mode, dir_fd=capability.descriptor)
+    created = True
+    try:
+        os.fchmod(descriptor, mode)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short write while publishing GC retirement record")
+            view = view[written:]
+        os.fsync(descriptor)
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or observed.st_nlink != 1
+            or stat.S_IMODE(observed.st_mode) != mode
+        ):
+            raise RuntimeError("GC retirement record metadata changed during publication")
+    except BaseException:
+        os.close(descriptor)
+        descriptor = -1
+        if created:
+            try:
+                os.unlink(name, dir_fd=capability.descriptor)
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _remove_gc_retirement_record(
+    capability: _GcRootCapability, record_name: str, *, allow_moved: bool = False
+) -> None:
+    os.unlink(record_name, dir_fd=capability.descriptor)
+    _fsync_gc_root(capability, allow_moved=allow_moved)
+
+
+def _resume_gc_retirements(
+    capability: _GcRootCapability,
+    *,
+    runtime_references: set[Path],
+    lock_verifier,
+) -> tuple[list[str], list[dict[str, str]]]:
+    root = _gc_root_path(capability)
+    references = _gc_reference_map(root, runtime_references)
+    deleted: list[str] = []
+    retained: list[dict[str, str]] = []
+    records = sorted(root.glob(".gc-retired-*.record"), key=lambda path: path.name)
+    for opening_record in records:
+        root = _gc_root_path(capability)
+        record = root / opening_record.name
+        try:
+            release, retirement, identity = _read_gc_retirement_record(root, record)
+        except (OSError, RuntimeError, ValueError) as exc:
+            retained.append({"path": str(record), "reason": f"unverified-record: {exc}"})
+            continue
+        try:
+            canonical = os.stat(
+                release.name, dir_fd=capability.descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            canonical = None
+        try:
+            retired = os.stat(
+                retirement.name, dir_fd=capability.descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            retired = None
+        if canonical is not None:
+            if retired is None and (canonical.st_dev, canonical.st_ino) == identity:
+                _remove_gc_retirement_record(capability, record.name)
+                continue
+            retained.append({"path": str(retirement), "reason": "foreign-canonical-successor"})
+            continue
+        if retired is None:
+            _remove_gc_retirement_record(capability, record.name)
+            deleted.append(str(release))
+            continue
+        if (
+            not stat.S_ISDIR(retired.st_mode)
+            or stat.S_ISLNK(retired.st_mode)
+            or retired.st_uid != os.getuid()
+            or (retired.st_dev, retired.st_ino) != identity
+        ):
+            retained.append({"path": str(retirement), "reason": "retirement-identity-changed"})
+            continue
+        if release in references:
+            retained.append({"path": str(retirement), "reason": "referenced-partial-retirement"})
+            continue
+        lock_verifier()
+        shutil.rmtree(retirement.name, dir_fd=capability.descriptor)
+        _fsync_gc_root(capability)
+        _remove_gc_retirement_record(capability, record.name)
+        deleted.append(str(release))
+    return deleted, retained
+
+
+def apply_release_gc(
+    agent_repo: Path,
+    *,
+    runtime_reference_supplier,
+    lock_verifier,
+) -> dict[str, object]:
+    """Retire and delete verified releases while the activation lock is held."""
+    if lock_verifier is None:
+        raise RuntimeError("release GC requires the shared activation lock")
+    lock_verifier()
+    agent_repo = Path(agent_repo)
+    root = release_root(agent_repo)
+    capability = _open_gc_root(root)
+    try:
+        initial_runtime = set(runtime_reference_supplier())
+        plan = plan_release_gc(agent_repo, runtime_references=initial_runtime)
+        _gc_root_path(capability)
+        deleted, retained = _resume_gc_retirements(
+            capability,
+            runtime_references=initial_runtime,
+            lock_verifier=lock_verifier,
+        )
+        for candidate in plan["candidates"]:
+            opening_release = Path(candidate)
+            release_name = opening_release.name
+            lock_verifier()
+            active_root = _gc_root_path(capability)
+            release = active_root / release_name
+            _verify_gc_release(agent_repo, release)
+            before = os.stat(
+                release_name, dir_fd=capability.descriptor, follow_symlinks=False
+            )
+            identity = (before.st_dev, before.st_ino)
+            retirement_name = (
+                f".gc-retired-{release_name.removeprefix('release-')}-"
+                f"{secrets.token_hex(16)}"
+            )
+            record_name = f"{retirement_name}.record"
+            retirement = active_root / retirement_name
+            record = active_root / record_name
+            _write_private_candidate_at(
+                capability,
+                record_name,
+                _gc_retirement_record_payload(release, retirement, identity),
+                0o600,
+            )
+            try:
+                _fsync_gc_root(capability)
+            except BaseException:
+                try:
+                    _remove_gc_retirement_record(
+                        capability, record_name, allow_moved=True
+                    )
+                except BaseException:
+                    pass
+                raise
+            renamed = False
+            try:
+                lock_verifier()
+                _rename_exclusive_at(
+                    capability.descriptor, release_name, retirement_name
+                )
+                renamed = True
+                _fsync_gc_root(capability)
+            except BaseException:
+                if renamed:
+                    try:
+                        _restore_retired_release(
+                            capability, retirement_name, release_name, identity
+                        )
+                        _remove_gc_retirement_record(
+                            capability, record_name, allow_moved=True
+                        )
+                    except BaseException:
+                        pass
+                else:
+                    _remove_gc_retirement_record(capability, record_name)
+                raise
+            deletion_started = False
+            try:
+                active_root = _gc_root_path(capability)
+                release = active_root / release_name
+                retirement = active_root / retirement_name
+                references = _gc_reference_map(
+                    active_root, set(runtime_reference_supplier())
+                )
+                if release in references:
+                    _restore_retired_release(
+                        capability, retirement_name, release_name, identity
+                    )
+                    _remove_gc_retirement_record(capability, record_name)
+                    retained.append(
+                        {"path": str(opening_release), "reason": "referenced-after-retirement"}
+                    )
+                    continue
+                try:
+                    os.stat(
+                        release_name,
+                        dir_fd=capability.descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise RuntimeError(
+                        f"foreign canonical successor appeared; retained {retirement}"
+                    )
+                observed = os.stat(
+                    retirement_name,
+                    dir_fd=capability.descriptor,
+                    follow_symlinks=False,
+                )
+                if (observed.st_dev, observed.st_ino) != identity:
+                    raise RuntimeError("retired release identity changed before verification")
+                _verify_gc_release(
+                    agent_repo, retirement, canonical_name=release_name
+                )
+                observed = os.stat(
+                    retirement_name,
+                    dir_fd=capability.descriptor,
+                    follow_symlinks=False,
+                )
+                if (observed.st_dev, observed.st_ino) != identity:
+                    raise RuntimeError("retired release identity changed before deletion")
+                lock_verifier()
+                deletion_started = True
+                shutil.rmtree(retirement_name, dir_fd=capability.descriptor)
+                _fsync_gc_root(capability)
+                _remove_gc_retirement_record(capability, record_name)
+                deleted.append(str(opening_release))
+            except BaseException:
+                try:
+                    retired = os.stat(
+                        retirement_name,
+                        dir_fd=capability.descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    retired = None
+                if not deletion_started and retired is not None:
+                    try:
+                        _restore_retired_release(
+                            capability, retirement_name, release_name, identity
+                        )
+                    except BaseException:
+                        pass
+                raise
+        return {
+            "deleted": sorted(set(deleted)),
+            "retained": sorted(retained, key=lambda item: (item["path"], item["reason"])),
+        }
+    finally:
+        os.close(capability.descriptor)
+
+
 def _owned_incomplete_fingerprint_paths(release: Path) -> set[str]:
     """Return only exact producer stamp artifacts safe to retire after a crash."""
     carried = _run_git(release, "rev-parse", "HEAD")
@@ -1477,8 +2240,17 @@ def _publish_completion_receipt(layout: ReleaseLayout, upstream: str, carried: s
 
 def _verify_completed_release(layout: ReleaseLayout, upstream: str, carried: str) -> None:
     receipt = layout.release / _COMPLETION_RECEIPT
-    if not receipt.exists() or receipt.is_symlink():
-        raise RuntimeError("existing release has no completion receipt")
+    try:
+        receipt_info = os.lstat(receipt)
+    except FileNotFoundError as exc:
+        raise RuntimeError("existing release has no completion receipt") from exc
+    if (
+        not stat.S_ISREG(receipt_info.st_mode)
+        or receipt_info.st_uid != os.getuid()
+        or receipt_info.st_nlink != 1
+        or stat.S_IMODE(receipt_info.st_mode) != 0o600
+    ):
+        raise RuntimeError("existing release completion receipt is not private")
     try:
         observed = json.loads(_stable_regular_bytes(receipt))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1534,12 +2306,107 @@ def main() -> int:
     render_selector.add_argument("upstream")
     render_selector.add_argument("carried")
     render_selector.add_argument("selector_candidate", type=Path)
+    render_reference = subparsers.add_parser("render-reference")
+    render_reference.add_argument("agent_repo", type=Path)
+    render_reference.add_argument("release", type=Path)
+    render_reference.add_argument("reference_candidate", type=Path)
+    gc = subparsers.add_parser("gc")
+    gc.add_argument("agent_repo", type=Path)
+    gc.add_argument("--launchd-plist", type=Path)
+    gc.add_argument("--apply", action="store_true")
     baseline = subparsers.add_parser("launcher-baseline")
     baseline.add_argument("agent_repo", type=Path)
     baseline.add_argument("upstream")
     baseline.add_argument("carried")
     baseline.add_argument("launcher", type=Path)
     args = parser.parse_args()
+    if args.action == "gc":
+        root = release_root(args.agent_repo)
+        launchd_plist = args.launchd_plist or (
+            Path.home() / "Library/LaunchAgents/ai.hermes.gateway.plist"
+        )
+        supplier = lambda: collect_runtime_references(root, launchd_plist)
+        if not args.apply:
+            print(
+                json.dumps(
+                    plan_release_gc(
+                        args.agent_repo,
+                        runtime_references=supplier(),
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
+        if sys.platform != "darwin":
+            raise RuntimeError("release GC apply is supported only on macOS")
+        hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+        if not hermes_home.is_absolute():
+            raise RuntimeError("HERMES_HOME must be absolute for release GC apply")
+        state = hermes_home / "state"
+        lock = state / "hermes-kanban-update.lock"
+        state_helper = Path(__file__).with_name("update-state.py")
+        subprocess.run(
+            [sys.executable, str(state_helper), "ensure-dir", "directory", str(state)],
+            check=True,
+        )
+        token = f"gc-{os.getpid()}-{secrets.token_hex(16)}"
+        subprocess.run(
+            [
+                sys.executable,
+                str(state_helper),
+                "lock-acquire",
+                "lock",
+                str(lock),
+                token,
+            ],
+            check=True,
+        )
+        def verify_lock() -> None:
+            observed = subprocess.run(
+                [
+                    sys.executable,
+                    str(state_helper),
+                    "lock-read",
+                    "lock",
+                    str(lock),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            if observed != f"{token}\n":
+                raise RuntimeError("shared activation lock identity changed")
+
+        try:
+            result = apply_release_gc(
+                args.agent_repo,
+                runtime_reference_supplier=supplier,
+                lock_verifier=verify_lock,
+            )
+        finally:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(state_helper),
+                    "lock-release",
+                    "lock",
+                    str(lock),
+                    token,
+                ],
+                check=True,
+            )
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+    if args.action == "render-reference":
+        root = release_root(args.agent_repo)
+        _write_private_candidate(
+            args.reference_candidate,
+            release_reference_payload(root, args.release),
+            0o600,
+        )
+        print(root / "previous")
+        return 0
     layout = release_layout(args.agent_repo, args.upstream, args.carried)
     if args.action == "prepare":
         print(

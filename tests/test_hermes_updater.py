@@ -392,6 +392,10 @@ def selector(env: dict[str, str]) -> Path:
     return release_root(env) / "current"
 
 
+def previous_selector(env: dict[str, str]) -> Path:
+    return release_root(env) / "previous"
+
+
 def target_release(env: dict[str, str]) -> Path:
     return release_root(env) / f"release-{CARRIED_HEAD}"
 
@@ -498,6 +502,67 @@ def test_activation_selects_the_reviewed_release_and_restarts_the_gateway(
     assert not lock_dir(env).exists()
     # The restarted service reached the reviewed release through the selector.
     assert Path(env["HERMES_TEST_RELEASE_MARKER"]).exists()
+
+
+def test_activation_publishes_the_prior_current_as_durable_previous(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    prior = release_root(env) / f"release-{'b' * 40}"
+    release_root(env).mkdir(mode=0o700)
+    selector(env).write_text(f"{prior}\n", encoding="utf-8")
+    selector(env).chmod(0o600)
+
+    activate(env)
+
+    assert selector(env).read_text(encoding="utf-8") == f"{target_release(env)}\n"
+    assert previous_selector(env).read_text(encoding="utf-8") == f"{prior}\n"
+    assert previous_selector(env).stat().st_mode & 0o777 == 0o600
+
+
+def test_activation_refuses_a_hardlinked_previous_reference_before_replacement(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    prior = release_root(env) / f"release-{'b' * 40}"
+    release_root(env).mkdir(mode=0o700)
+    selector(env).write_text(f"{prior}\n", encoding="utf-8")
+    selector(env).chmod(0o600)
+    foreign_peer = tmp_path / "foreign-previous-peer"
+    foreign_peer.write_text(f"{prior}\n", encoding="utf-8")
+    foreign_peer.chmod(0o644)
+    os.link(foreign_peer, previous_selector(env))
+    identity = foreign_peer.stat().st_ino
+    before = foreign_peer.read_bytes()
+    before_mode = foreign_peer.stat().st_mode
+
+    result = run(env)
+
+    assert result.returncode != 0
+    assert "private regular file" in result.stderr
+    assert selector(env).read_text(encoding="utf-8") == f"{prior}\n"
+    assert foreign_peer.stat().st_ino == identity
+    assert previous_selector(env).stat().st_ino == identity
+    assert foreign_peer.read_bytes() == before
+    assert foreign_peer.stat().st_mode == before_mode
+    assert foreign_peer.stat().st_nlink == 2
+
+
+def test_previous_is_durable_before_current_moves_on_an_interrupted_activation(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    prior = release_root(env) / f"release-{'b' * 40}"
+    release_root(env).mkdir(mode=0o700)
+    selector(env).write_text(f"{prior}\n", encoding="utf-8")
+    selector(env).chmod(0o600)
+    env["FAKE_PY_KILL_PARENT_AFTER_TARGET"] = str(selector(env))
+
+    interrupted = run(env)
+
+    assert interrupted.returncode != 0
+    assert selector(env).read_text(encoding="utf-8") == f"{target_release(env)}\n"
+    assert previous_selector(env).read_text(encoding="utf-8") == f"{prior}\n"
 
 
 def test_activation_leaves_the_managed_launcher_and_its_binding_untouched(
@@ -708,6 +773,7 @@ def test_gateway_restart_failure_rolls_the_selector_back(tmp_path: Path) -> None
 
     assert result.returncode != 0
     assert selector(env).read_text(encoding="utf-8") == f"{superseded}\n"
+    assert not previous_selector(env).exists()
     assert gateway_plist(env).read_bytes() == prior_plist
     launchctl_calls = log_lines(env, "FAKE_LAUNCHCTL_LOG")
     assert launchctl_calls == [
