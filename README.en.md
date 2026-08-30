@@ -17,17 +17,31 @@ Unified Kanban records real user turns from Hermes Agent, Claude Code, and Codex
 
 ## Supported environment
 
-The installation and real smoke flow are currently verified on macOS with Python 3.11+ and a configured Hermes Agent checkout. Windows and WSL2 are unsupported. Linux is not claimed as supported until a real-machine smoke is recorded.
+The installation and real smoke flow are currently verified on macOS. On a genuinely empty per-user macOS host, setup can bootstrap the repository-pinned exact Hermes and required toolchain; an existing configured checkout remains supported. Windows and WSL2 are unsupported. Linux is not claimed as supported until a real-machine smoke is recorded.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/LeeYuHoon/unified-kanban.git
 cd unified-kanban
-./scripts/setup.sh --dry-run --no-restart --skip-smoke
-hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
 ./scripts/setup.sh
 ```
+
+On an existing Hermes host, `./scripts/setup.sh --dry-run --no-restart --skip-smoke`
+previews integration changes. A genuinely empty host intentionally rejects dry-run because dry-run
+will not bootstrap; run the real setup shown above.
+
+Do not preinstall absent Hermes through a moving installer URL. On a genuinely empty macOS host,
+`setup.sh` verifies the frozen installer bytes and exact official commit before bootstrap. Existing,
+foreign, Desktop-managed, newer, dirty, or partial Hermes installations are preserved or rejected
+fail closed rather than reset or downgraded.
+
+A fresh non-interactive bootstrap does not create credentials or a board. On a receipt-managed
+bootstrap host, normal setup conservatively reports `authenticated smoke deferred` rather than inferring
+credential or board readiness; explicit `--skip-smoke` suppresses both smoke and that guidance. Complete `hermes setup`, create `unified-kanban-smoke`, then run
+`./scripts/kanban-smoke.sh` explicitly. If managed activation fails after plain bootstrap, rerun the same
+`setup.sh`: it authenticates and reuses the bootstrap receipt instead of running the installer again.
+Running setup twice selects the same exact release and does not duplicate managed entries.
 
 The setup command refuses to modify host configuration unless the frozen official SHA,
 repository pin, and carried stack agree. Release construction fetches that exact reviewed SHA from

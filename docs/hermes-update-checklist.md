@@ -179,7 +179,25 @@ git -C "$HERMES_AGENT_REPO" status --short --branch
 
 ## 4. 설치 호환성과 멱등성
 
-먼저 비파괴 preflight를 실행한다.
+### Fresh macOS bootstrap 및 partial retry
+
+검증 순서를 host 상태별로 섞지 않는다.
+
+1. **Empty host:** moving installer를 별도로 실행하거나 dry-run으로 bootstrap을 시도하지 않고 실제 `./scripts/setup.sh`를 실행한다. Empty-host dry-run은 host를 바꾸지 않기 위해 의도적으로 거부된다.
+2. **Existing Hermes host:** 아래 비파괴 dry-run을 선택적으로 실행한다.
+3. **Deferred follow-up:** bootstrap-managed 일반 setup은 credential/board readiness를 추정하지 않고 `authenticated smoke deferred`를 보고한다. 명시적 `--skip-smoke`는 smoke와 deferred 안내를 함께 생략한다. 이후 `hermes setup`, board 생성, `scripts/kanban-smoke.sh` 순서로 명시적으로 완료한다.
+4. **Partial retry:** bootstrap 뒤 activation 실패를 재현하고, 원인을 제거한 뒤 같은 setup을 재실행한다.
+5. **Setup twice:** 성공한 setup을 한 번 더 실행해 exact release와 관리 artifact가 변하거나 중복되지 않는지 확인한다.
+
+- [ ] fixture의 empty `HOME`, missing absolute checkout path인 `HERMES_AGENT_REPO`, missing `hermes`에서만 frozen bootstrap이 한 번 실행된다.
+- [ ] bootstrap 이후 selector publication 다음 activation을 의도적으로 실패시키면 transaction이 selector·integration artifact를 롤백하고 plain Hermes와 private bootstrap receipt를 보존한다. 완성된 immutable release directory는 안전한 retry input으로 남을 수 있다.
+- [ ] 원인을 복구한 재실행은 installer를 다시 실행하지 않고 receipt를 인증해 같은 exact immutable release로 activation을 완료한다.
+- [ ] bootstrap-managed setup은 smoke 성공을 주장하지 않고 `authenticated smoke deferred`와 explicit smoke-script guidance를 출력한다.
+- [ ] 성공 후 setup을 다시 실행해도 bootstrap 호출 수, exact selector/receipt, Claude/Codex hook bytes, plugin target/config가 변하거나 중복되지 않는다.
+
+이 시나리오는 실제 `HOME`이나 production selector를 변경하지 않는 temporary-home E2E인 `tests/test_hermes_setup.py::test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_smoke`로 고정한다.
+
+기존 Hermes host에서만 선택적으로 비파괴 preflight를 실행한다.
 
 ```bash
 ./scripts/setup.sh --dry-run --no-restart --skip-smoke

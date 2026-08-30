@@ -92,13 +92,25 @@ def environment(tmp_path: Path) -> dict[str, str]:
         "  printf '%s\\n' \"$release\"\n"
         "  exit 0\n"
         "fi\n"
+        "if [[ $1 == */scripts/path-transaction.py && ${2:-} == replace-file "
+        "&& ${5:-} == \"$HOME/.local/bin/hermes\" "
+        "&& -n ${HERMES_TEST_ACTIVATION_FAIL_ONCE:-} "
+        "&& ! -e $HERMES_TEST_ACTIVATION_FAIL_ONCE ]]; then\n"
+        "  : >\"$HERMES_TEST_ACTIVATION_FAIL_ONCE\"\n"
+        "  echo 'intentional activation failure after selector publication' >&2\n"
+        "  exit 97\n"
+        "fi\n"
         f"exec {shlex.quote(sys.executable)} \"$@\"\n",
         encoding="utf-8",
     )
     python.chmod(0o755)
+    parent_environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("HERMES_")
+    }
     return {
-        **os.environ,
+        **parent_environment,
         "HOME": str(tmp_path),
+        "HERMES_HOME": str(tmp_path / ".hermes"),
         "XDG_STATE_HOME": str(tmp_path / ".local/state"),
         "XDG_CACHE_HOME": str(tmp_path / ".cache"),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -330,10 +342,49 @@ def test_uninstall_without_installed_plugin_skips_disable(tmp_path: Path) -> Non
 
 
 
-def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_smoke(
+def test_fresh_macos_dry_run_refuses_without_bootstrap_or_artifacts(
     tmp_path: Path,
 ) -> None:
     env = environment(tmp_path)
+    fake_bin = Path(env["PATH"].split(":", 1)[0])
+    (fake_bin / "hermes").unlink()
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    Path(env["HERMES_AGENT_REPO"]).rmdir()
+
+    result = run(SETUP, env, "--dry-run", "--skip-smoke")
+
+    assert result.returncode != 0
+    assert "dry-run will not bootstrap a host" in result.stderr
+    assert not Path(env["HERMES_AGENT_REPO"]).exists()
+    release_root = Path(env["HERMES_AGENT_REPO"] + ".releases")
+    assert not release_root.exists()
+    assert not (release_root / "current").exists()
+    assert not (Path(env["XDG_STATE_HOME"]) / "unified-kanban/hermes-bootstrap.receipt").exists()
+    assert not (tmp_path / ".local/bin/hermes").exists()
+    assert not plugin_target(tmp_path).exists()
+    for relative in (
+        ".local/bin/kanban-adapter",
+        ".local/bin/claude-kanban-hook",
+        ".local/bin/codex-kanban-hook",
+        ".local/bin/ai-session-viewer",
+        ".claude/settings.json",
+        ".codex/hooks.json",
+    ):
+        assert not (tmp_path / relative).exists()
+
+
+def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_smoke(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    foreign_hermes_home = tmp_path.parent / "foreign-hermes-home"
+    foreign_activation_marker = tmp_path.parent / "foreign-activation-marker"
+    monkeypatch.setenv("HERMES_HOME", str(foreign_hermes_home))
+    monkeypatch.setenv(
+        "HERMES_TEST_ACTIVATION_FAIL_ONCE", str(foreign_activation_marker)
+    )
+    env = environment(tmp_path)
+    assert env["HERMES_HOME"] == str(tmp_path / ".hermes")
     fixture_root = Path(env["_TEST_ROOT"])
     fake_bin = Path(env["PATH"].split(":", 1)[0])
     source_hermes = tmp_path / "fake-hermes-source"
@@ -349,6 +400,8 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
     Path(env["HERMES_AGENT_REPO"]).rmdir()
     bootstrap_log = tmp_path / "bootstrap.log"
     env["BOOTSTRAP_TEST_LOG"] = str(bootstrap_log)
+    activation_failure_marker = tmp_path / "activation-failed-once"
+    env["HERMES_TEST_ACTIVATION_FAIL_ONCE"] = str(activation_failure_marker)
     bootstrap = fixture_root / "scripts/bootstrap-hermes-macos.sh"
     bootstrap.write_text(
         "#!/bin/bash\n"
@@ -377,9 +430,6 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
         encoding="utf-8",
     )
     bootstrap.chmod(0o755)
-    bundle = fixture_root / "patches/hermes-agent-carried.bundle"
-    bundle.unlink()
-
     failed = run(SETUP, env)
 
     assert failed.returncode != 0
@@ -389,23 +439,71 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
         env["HERMES_AGENT_REPO"],
         str(tmp_path / ".hermes"),
     ]
-    assert hermes_calls(env) == []
+    assert activation_failure_marker.is_file()
+    assert not any("plugins enable" in call for call in hermes_calls(env))
+    assert not Path(env["HERMES_AGENT_REPO"] + ".releases/current").exists()
+    assert (
+        Path(env["HERMES_AGENT_REPO"] + ".releases") / f"release-{CARRIED_HEAD}"
+    ).is_dir()
+    assert not plugin_target(tmp_path).exists()
+    for relative in (
+        ".local/bin/kanban-adapter",
+        ".local/bin/claude-kanban-hook",
+        ".local/bin/codex-kanban-hook",
+        ".local/bin/ai-session-viewer",
+        ".claude/settings.json",
+        ".codex/hooks.json",
+    ):
+        assert not (tmp_path / relative).exists()
 
-    shutil.copy2(REPO / "patches/hermes-agent-carried.bundle", bundle)
     retried = run(SETUP, env)
+    selector = Path(env["HERMES_AGENT_REPO"] + ".releases/current")
+    bootstrap_receipt = (
+        Path(env["XDG_STATE_HOME"]) / "unified-kanban/hermes-bootstrap.receipt"
+    )
+    expected_release = str(
+        Path(env["HERMES_AGENT_REPO"] + ".releases") / f"release-{CARRIED_HEAD}"
+    )
+    selector_after_retry = selector.read_bytes()
+    receipt_after_retry = bootstrap_receipt.read_bytes()
+    integration_after_retry = {
+        relative: (tmp_path / relative).read_bytes()
+        for relative in (".claude/settings.json", ".codex/hooks.json")
+    }
+    plugin_config_after_retry = (tmp_path / ".hermes/config.yaml").read_bytes()
     rerun = run(SETUP, env)
+    skipped_smoke = run(SETUP, env, "--skip-smoke")
 
     assert retried.returncode == 0, retried.stderr
     assert rerun.returncode == 0, rerun.stderr
+    assert skipped_smoke.returncode == 0, skipped_smoke.stderr
     assert "authenticated smoke deferred" in retried.stdout.lower()
     assert "scripts/kanban-smoke.sh" in retried.stdout
     assert "authenticated smoke deferred" in rerun.stdout.lower()
     assert "scripts/kanban-smoke.sh" in rerun.stdout
+    assert "authenticated smoke deferred" not in skipped_smoke.stdout.lower()
+    assert "scripts/kanban-smoke.sh" not in skipped_smoke.stdout
+    assert selector_after_retry == (expected_release + "\n").encode()
+    assert selector.read_bytes() == selector_after_retry
+    assert bootstrap_receipt.read_bytes() == receipt_after_retry
+    assert plugin_target(tmp_path).is_symlink()
+    assert os.readlink(plugin_target(tmp_path)) == str(
+        Path(env["_TEST_ROOT"]) / "integrations/hermes/hermes-kanban"
+    )
+    assert {
+        relative: (tmp_path / relative).read_bytes()
+        for relative in integration_after_retry
+    } == integration_after_retry
+    plugin_config_after_rerun = (tmp_path / ".hermes/config.yaml").read_bytes()
+    assert plugin_config_after_rerun == plugin_config_after_retry
+    assert plugin_config_after_rerun.count(b"hermes-kanban") == 1
     assert bootstrap_log.read_text(encoding="utf-8").splitlines() == [
         env["HERMES_AGENT_REPO"],
         str(tmp_path / ".hermes"),
     ]
     assert not any("kanban boards list --json" in call for call in hermes_calls(env))
+    assert not foreign_hermes_home.exists()
+    assert not foreign_activation_marker.exists()
 
 
 def test_bootstrap_managed_setup_finds_uv_in_hermes_home_bin(tmp_path: Path) -> None:

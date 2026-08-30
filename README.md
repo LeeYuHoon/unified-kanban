@@ -155,7 +155,7 @@ Observation 카드는 dispatcher가 실행한 run이 아니므로 의도적으�
 ## 검증 근거
 
 - **자동화 테스트** — CI가 수집된 전체 테스트를 실행합니다. 커버 범위는 어댑터 CLI와 백엔드, Claude/Codex/Hermes 훅 수명주기, 자동 위임·백그라운드 알림 제외, 사용량·토큰 정규화, Codex 모델 폴백, 훅 설치기, setup/uninstall, Hermes 플러그인 등록과 업데이터입니다.
-- **계약 스모크** — `scripts/kanban-smoke.sh`가 실제 Hermes CLI로 카드 생성 → 코멘트 → 완료 → archive를 왕복하고 각 단계를 `hermes kanban show` 출력으로 확인합니다. setup 마지막에 실행되며 실패 시 설치가 비정상 종료합니다.
+- **계약 스모크** — `scripts/kanban-smoke.sh`가 실제 Hermes CLI로 카드 생성 → 코멘트 → 완료 → archive를 왕복하고 각 단계를 `hermes kanban show` 출력으로 확인합니다. 기존 unmanaged Hermes host에서는 setup 마지막에 실행되고 실패 시 설치가 비정상 종료합니다. Bootstrap-managed host에서는 credential/board readiness를 추정하지 않고 항상 defer하므로 사용자 설정 후 이 스크립트를 명시적으로 실행합니다.
 - **설치 전 호환성 검사** — setup이 `hermes kanban --help` 계열 출력에서 `--observation`, `--tenant`, `--created-by`, `--initial-status`, `--json` 등 의존 플래그의 존재를 토큰 단위로 확인하고, frozen upstream exact object·reviewed carried chain·immutable release receipt를 검사한 뒤에만 파일을 씁니다.
 - **런타임 실측 기록** — Hermes REST 인증 경계, `skipped_nonspawnable`의 실제 동작과 이벤트 부재, tenant 사후 변경 불가, `gateway:startup` 훅 발화 등 설계 전제를 로컬에서 확인한 결과가 `docs/unified-kanban-spec.md` §6에 항목별로 기록되어 있습니다. 문서와 실제가 달랐던 항목은 설계를 실측에 맞춰 바꿨습니다.
 - **비파괴 예행 연습** — `./scripts/setup.sh --dry-run --no-restart --skip-smoke`로 머신을 변경하지 않고 설치 절차를 확인할 수 있습니다.
@@ -173,7 +173,7 @@ Observation 카드는 dispatcher가 실행한 run이 아니므로 의도적으�
 | --- | --- |
 | 검증 환경 | macOS |
 | 지원 제외 | Windows, WSL2 |
-| 필수 | Git, Bash, `curl`, Python 3.11 이상, Hermes Agent |
+| 필수 | macOS, Git, Bash, `curl`; 기존 Hermes가 없으면 setup이 저장소에 고정된 exact Hermes와 필요한 toolchain을 bootstrap |
 | 개발·업데이트 검증 | `uv` — lockfile 기반 전체 pytest와 isolated Hermes 회귀 테스트 실행에 사용 |
 | Hermes 경로 | 기본값 `~/.hermes/hermes-agent`; 다른 위치라면 절대 경로를 `HERMES_AGENT_REPO`로 지정 |
 | 선택 | Claude Code, Codex CLI — 해당 소스의 작업도 관측하려는 경우에만 필요 |
@@ -184,34 +184,15 @@ Observation 카드는 dispatcher가 실행한 run이 아니므로 의도적으�
 ```bash
 git --version
 bash --version
-python3 --version   # 3.11 이상
+python3 --version   # 기존 host 확인용; genuine empty host는 setup이 manifest 제약의 지원 toolchain을 bootstrap
 curl --version
 ```
 
 ### 2. Hermes Agent 설치 및 초기 설정
 
-Hermes Agent가 없다면 [공식 설치 문서](https://hermes-agent.nousresearch.com/docs/getting-started/installation)의 CLI 설치 명령을 사용합니다.
+Hermes가 없는 **genuine empty macOS per-user host**에서는 별도의 moving installer를 먼저 실행하지 않습니다. 아래에서 이 저장소를 clone한 뒤 `scripts/setup.sh`를 실행하면, 저장소 manifest에 고정된 official commit의 installer bytes를 SHA-256으로 검증하고 exact argv로 plain Hermes를 bootstrap한 다음 reviewed immutable release를 선택합니다. `https://hermes-agent.nousresearch.com/install.sh` 같은 moving URL을 setup 경로에서 직접 실행하지 않습니다.
 
-```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-```
-
-새 셸을 열거나 셸 설정을 다시 읽은 뒤 Hermes를 설정하고 상태를 확인합니다.
-
-```bash
-source ~/.zshrc  # Bash를 사용한다면: source ~/.bashrc
-hermes setup
-hermes doctor
-hermes version
-test -d "${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
-```
-
-`hermes` 명령을 찾지 못하면 현재 셸의 PATH에 사용자 실행 파일 디렉터리를 추가한 뒤 다시 확인하세요.
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-command -v hermes
-```
+기존 Hermes, Desktop, newer/custom/dirty/partial 설치가 있으면 bootstrap이 이를 reset·downgrade·덮어쓰지 않습니다. 정확히 인증된 managed bootstrap이 아니면 기존 official 설치 흐름으로 넘기거나 fail closed하며, `HERMES_AGENT_REPO`를 지정할 때는 absolute path여야 합니다.
 
 ### 3. Unified Kanban clone
 
@@ -232,7 +213,7 @@ test -f patches/hermes-agent-carried.bundle
 
 ### 4. 선택 사항: 비파괴 사전 점검
 
-실제 파일, 훅, 플러그인, Gateway를 변경하지 않고 설치 계획만 확인하려면 다음을 실행합니다.
+이미 Hermes checkout이 있는 host에서 실제 파일, 훅, 플러그인, Gateway를 변경하지 않고 설치 계획만 확인하려면 다음을 실행합니다. Genuine empty host의 dry-run은 host를 bootstrap하지 않으므로 `Hermes Agent checkout not found ... dry-run will not bootstrap a host`로 fail closed합니다. 신규 host에서는 이 단계를 건너뛰고 다음 절의 실제 setup을 실행합니다.
 
 ```bash
 ./scripts/setup.sh --dry-run --no-restart --skip-smoke
@@ -242,16 +223,26 @@ test -f patches/hermes-agent-carried.bundle
 
 ### 5. 설치
 
-기본 smoke 보드를 최초 1회 만든 뒤 setup을 실행합니다.
+setup을 실행합니다. 기존에 인증과 smoke board가 준비되어 있다면 마지막 authenticated smoke까지 수행합니다.
 
 ```bash
-hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
 ./scripts/setup.sh
 ```
 
+신규 bootstrap은 provider credential이나 board를 만들지 않습니다. Bootstrap receipt로 관리되는 host의 일반 setup은 인증 여부를 추정하지 않고 authenticated smoke를 `deferred`로 보고합니다. `--skip-smoke`를 명시하면 smoke와 deferred 안내를 함께 생략합니다. core install과 managed activation이 끝난 뒤 다음 순서로 사용자 설정을 마치고 smoke를 명시적으로 실행합니다.
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+hermes setup
+hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
+./scripts/kanban-smoke.sh
+```
+
+plain bootstrap 뒤 immutable activation이나 integration 설치가 실패해도 usable plain Hermes와 private bootstrap receipt를 삭제하지 않습니다. 원인을 고친 뒤 같은 `./scripts/setup.sh`를 다시 실행하면 installer를 다시 실행하지 않고 receipt를 인증해 activation부터 재개합니다. 성공 후 setup을 다시 실행해도 같은 exact release를 사용하고 관리 항목을 중복 생성하지 않습니다.
+
 설치 스크립트는 다음 작업을 순서대로 수행합니다.
 
-1. Python/Hermes/Git과 필요한 `hermes kanban` CLI 옵션을 검사합니다.
+1. host 상태를 분류하고, genuine empty macOS host에서만 frozen installer와 manifest identity를 검증해 exact plain Hermes를 bootstrap합니다.
 2. 저장소가 검증한 `patches/hermes-agent-supported-upstream`의 frozen SHA를 fixed official HTTPS 저장소에서 exact object로 가져와 identity를 확인합니다.
 3. `patches/hermes-agent-carried.bundle`의 prerequisite, ordered refs, 선형 parent chain과 최종 carried commit을 검증합니다.
 4. 검증된 object로 checkout과 분리된 불변 Hermes release를 구성하거나 completion receipt까지 정확히 재검증한 뒤 설치를 계속합니다.
@@ -263,7 +254,7 @@ hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
 6. 기존 항목을 보존하면서 Claude/Codex 훅을 `~/.claude/settings.json`과 `~/.codex/hooks.json`에 멱등 병합합니다.
 7. `integrations/hermes/hermes-kanban`을 `~/.hermes/plugins/hermes-kanban`에 연결하고 플러그인을 활성화합니다.
 8. Hermes Gateway를 재시작합니다.
-9. 미리 생성된 Hermes Kanban 보드에서 카드 생성 → 코멘트 → 완료 → archive를 검증하는 smoke test를 실행합니다. 기본 smoke 보드는 `unified-kanban-smoke`이며 테스트 카드는 마지막에 archive됩니다. Board 생성은 transaction ownership을 안전하게 증명할 수 없어 setup과 smoke가 대신 수행하지 않습니다.
+9. 기존 unmanaged Hermes host에서는 인증과 미리 생성된 board가 있으면 카드 생성 → 코멘트 → 완료 → archive를 검증합니다. Bootstrap-managed host의 일반 setup은 credential/board 존재를 추정하지 않고 `deferred`로 보고하므로, 설정 후 `scripts/kanban-smoke.sh`를 명시적으로 실행합니다. `--skip-smoke`를 지정하면 이 deferred 안내도 출력하지 않습니다. 기본 smoke 보드는 `unified-kanban-smoke`이고 테스트 카드는 마지막에 archive됩니다. Board 생성은 transaction ownership을 안전하게 증명할 수 없어 setup과 smoke가 대신 수행하지 않습니다.
 
 bundle은 이 저장소에 포함되므로 별도의 개인 fork remote나 기존 컴퓨터의 Git object database가 필요하지 않습니다. 동일한 checkout에서 `setup.sh`를 다시 실행해도 관리 항목을 중복 생성하지 않습니다. 반대로 기존 일반 파일이나 다른 대상을 가리키는 심볼릭 링크를 발견하면 덮어쓰지 않고 안전하게 중단합니다.
 
@@ -336,7 +327,7 @@ export PATH="$HOME/.local/bin:$PATH"
 | 메시지/증상 | 해결 방법 |
 | --- | --- |
 | `hermes: command not found` | 새 셸을 열거나 `export PATH="$HOME/.local/bin:$PATH"` 후 `command -v hermes` 확인 |
-| `Hermes Agent checkout not found` | 공식 Hermes 설치를 완료하거나 실제 checkout 절대 경로를 `HERMES_AGENT_REPO`로 지정 |
+| `Hermes Agent checkout not found` | Genuine empty host의 dry-run이라면 정상적인 fail-closed이므로 실제 `./scripts/setup.sh`를 실행. Real setup에서 발생했다면 foreign `hermes` command나 partial/기존 상태를 확인하고, 기존 checkout을 사용할 때만 absolute `HERMES_AGENT_REPO` 지정 |
 | `Hermes version mismatch` | `./scripts/update-hermes-if-needed.sh` 실행 후 `./scripts/setup.sh` 재실행 |
 | frozen upstream object unavailable/mismatch | fixed official HTTPS 저장소에서 저장소 pin의 exact object를 가져와 identity를 확인할 수 없습니다. setup을 우회하지 말고 network·pin·official provenance를 확인하세요. |
 | dirty Hermes checkout | activation blocker가 아닙니다. checkout은 release root 위치를 정하는 읽기 전용 입력이며 setup/updater는 reset·stash·revert하거나 파일을 변경하지 않습니다. |
