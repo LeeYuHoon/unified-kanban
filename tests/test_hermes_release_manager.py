@@ -663,6 +663,42 @@ def test_gc_apply_requires_the_shared_activation_lock(tmp_path: Path) -> None:
         )
 
 
+def test_gc_apply_preserves_lock_failure_when_record_cleanup_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    checks = 0
+
+    def fail_lock_before_retirement() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            raise RuntimeError("primary lock verification failure")
+
+    def fail_record_cleanup(*args, **kwargs) -> None:
+        raise OSError("secondary record cleanup failure")
+
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_record_cleanup)
+
+    with pytest.raises(RuntimeError, match="primary lock verification failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=fail_lock_before_retirement,
+        )
+
+    assert any("secondary record cleanup failure" in note for note in raised.value.__notes__)
+    assert stale.release.is_dir()
+    assert list(stale.root.glob(".gc-retired-*.record"))
+    assert not any(
+        path.is_dir() and path.name.startswith(".gc-retired-")
+        for path in stale.root.iterdir()
+    )
+
+
 def test_gc_apply_rechecks_lock_before_namespace_mutation(tmp_path: Path) -> None:
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
@@ -773,6 +809,314 @@ def test_gc_cli_apply_uses_and_releases_the_shared_updater_lock(
     assert not (hermes_home / "state/hermes-kanban-update.lock").exists()
 
 
+def test_gc_cli_emits_partial_results_before_a_later_candidate_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    releases = sorted(
+        (
+            build_completed_release(helper, checkout, tmp_path / "partial-first"),
+            build_completed_release(helper, checkout, tmp_path / "partial-second"),
+        ),
+        key=lambda layout: str(layout.release),
+    )
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    reference_calls = 0
+
+    def fail_for_second_candidate(root: Path, plist: Path) -> set[Path]:
+        nonlocal reference_calls
+        reference_calls += 1
+        if reference_calls == 3:
+            raise RuntimeError("injected later reference failure")
+        return set()
+
+    monkeypatch.setattr(helper, "collect_runtime_references", fail_for_second_candidate)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(RuntimeError, match="injected later reference failure"):
+        helper.main()
+
+    records = list(releases[1].root.glob(".*.record"))
+    assert len(records) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "deleted": [str(releases[0].release)],
+        "error": {
+            "message": "injected later reference failure",
+            "type": "RuntimeError",
+        },
+        "retained": [
+            {"path": str(records[0]), "reason": "record-retained-after-compensation"},
+            {"path": str(releases[1].release), "reason": "restored-after-failure"},
+        ],
+        "status": "partial",
+    }
+    assert not releases[0].release.exists()
+    assert releases[1].release.is_dir()
+    assert not (hermes_home / "state/hermes-kanban-update.lock").exists()
+
+
+def test_gc_restoration_probe_failure_reports_indeterminate_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "restore-probe-work")
+    calls = 0
+    restoration_failed = False
+    primary = RuntimeError("primary post-retirement failure")
+    restore_failure = OSError("injected restoration failure")
+    probe_failure = OSError("injected restoration outcome probe failure")
+    original_stat = helper.os.stat
+
+    def fail_after_retirement() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise primary
+        return set()
+
+    def fail_restoration(capability, retirement_name, release_name, identity):
+        nonlocal restoration_failed
+        restoration_failed = True
+        raise restore_failure
+
+    def fail_retirement_outcome_probe(path, *args, **kwargs):
+        if (
+            restoration_failed
+            and isinstance(path, str)
+            and path.startswith(".gc-retired-")
+            and not path.endswith(".record")
+            and kwargs.get("dir_fd") is not None
+        ):
+            raise probe_failure
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper, "_restore_retired_release", fail_restoration)
+    monkeypatch.setattr(helper.os, "stat", fail_retirement_outcome_probe)
+
+    with pytest.raises(RuntimeError, match="primary post-retirement failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=fail_after_retirement,
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    retirements = list(stale.root.glob(".gc-retired-*"))
+    retirement = next(path for path in retirements if not path.name.endswith(".record"))
+    record = next(path for path in retirements if path.name.endswith(".record"))
+    assert partial["retained"] == [
+        {
+            "path": str(retirement),
+            "reason": (
+                "indeterminate-restoration-state: "
+                "injected restoration outcome probe failure"
+            ),
+        },
+        {"path": str(record), "reason": "record-retained-after-compensation"},
+    ]
+    assert retirement.is_dir()
+    assert record.is_file()
+    assert any(
+        "restoration outcome probe also failed" in note
+        for note in raised.value.__notes__
+    )
+
+
+def test_gc_restoration_failure_does_not_report_disappeared_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    calls = 0
+    primary = RuntimeError("primary post-retirement failure")
+    original_restore = helper._restore_retired_release
+
+    def fail_after_retirement() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise primary
+        return set()
+
+    def disappear_during_restoration(
+        capability, retirement_name, release_name, identity
+    ):
+        helper.shutil.rmtree(stale.root / retirement_name)
+        return original_restore(
+            capability, retirement_name, release_name, identity
+        )
+
+    monkeypatch.setattr(
+        helper, "_restore_retired_release", disappear_during_restoration
+    )
+    with pytest.raises(RuntimeError, match="primary post-retirement failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=fail_after_retirement,
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert Path(retained["path"]).is_file()
+    assert retained["reason"] == "record-retained-after-compensation"
+    assert not stale.release.exists()
+    assert not any(
+        path.is_dir() and path.name.startswith(".gc-retired-")
+        for path in stale.root.iterdir()
+    )
+    assert any(
+        "GC restoration also failed" in note for note in raised.value.__notes__
+    )
+
+
+def test_gc_cli_reports_retirement_when_safe_restoration_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    releases = sorted(
+        (
+            build_completed_release(helper, checkout, tmp_path / "restore-first"),
+            build_completed_release(helper, checkout, tmp_path / "restore-second"),
+        ),
+        key=lambda layout: str(layout.release),
+    )
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    reference_calls = 0
+
+    def install_successor_then_fail(root: Path, plist: Path) -> set[Path]:
+        nonlocal reference_calls
+        reference_calls += 1
+        if reference_calls == 3:
+            releases[1].release.mkdir(mode=0o700)
+            raise RuntimeError("injected later reference failure")
+        return set()
+
+    monkeypatch.setattr(helper, "collect_runtime_references", install_successor_then_fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(RuntimeError, match="injected later reference failure") as raised:
+        helper.main()
+
+    assert any(
+        "GC restoration also failed" in note
+        and "foreign canonical successor" in note
+        for note in raised.value.__notes__
+    )
+    output = json.loads(capsys.readouterr().out)
+    retirements = [
+        path
+        for path in releases[1].root.glob(".gc-retired-*")
+        if path.is_dir()
+    ]
+    assert len(retirements) == 1
+    assert output["deleted"] == [str(releases[0].release)]
+    records = list(releases[1].root.glob(".*.record"))
+    assert len(records) == 1
+    assert output["retained"] == [
+        {
+            "path": str(retirements[0]),
+            "reason": (
+                "restoration-failed: foreign canonical successor prevents GC "
+                f"restoration; retained {retirements[0]}"
+            ),
+        },
+        {"path": str(records[0]), "reason": "record-retained-after-compensation"},
+        {
+            "path": str(releases[1].release),
+            "reason": "foreign-canonical-successor",
+        },
+    ]
+    assert output["status"] == "partial"
+    assert output["error"] == {
+        "message": "injected later reference failure",
+        "type": "RuntimeError",
+    }
+
+
+def test_gc_cli_preserves_original_failure_when_lock_release_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    original_failure = RuntimeError("original GC failure")
+    setattr(
+        original_failure,
+        "gc_partial_result",
+        {"deleted": [str(tmp_path / "deleted-release")], "retained": []},
+    )
+
+    def fail_gc(*args, **kwargs):
+        raise original_failure
+
+    original_run = helper.subprocess.run
+
+    def fail_lock_release(command, **kwargs):
+        if "lock-release" in command:
+            raise subprocess.CalledProcessError(71, command)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(helper, "apply_release_gc", fail_gc)
+    monkeypatch.setattr(helper.subprocess, "run", fail_lock_release)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(RuntimeError, match="original GC failure") as raised:
+        helper.main()
+
+    assert raised.value is original_failure
+    traceback_names = []
+    observed_traceback = raised.value.__traceback__
+    while observed_traceback is not None:
+        traceback_names.append(observed_traceback.tb_frame.f_code.co_name)
+        observed_traceback = observed_traceback.tb_next
+    assert traceback_names.count("main") == 1
+    assert traceback_names[-1] == "fail_gc"
+    assert json.loads(capsys.readouterr().out) == {
+        "deleted": [str(tmp_path / "deleted-release")],
+        "error": {"message": "original GC failure", "type": "RuntimeError"},
+        "retained": [],
+        "status": "partial",
+    }
+    assert (hermes_home / "state/hermes-kanban-update.lock").is_symlink()
+
+
 def test_gc_apply_retains_a_partially_deleted_retirement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -819,11 +1163,77 @@ def test_gc_apply_retains_a_partially_deleted_retirement(
         {
             "path": str(retired[0]),
             "reason": "unverified-partial-retirement: existing release completion receipt does not match content",
-        }
+        },
+        {
+            "path": str(records[0]),
+            "reason": "record-retained-with-unverified-partial-retirement",
+        },
     ]
     assert retired[0].is_dir()
     assert records[0].is_file()
     assert not stale.release.exists()
+
+
+def test_gc_cli_reports_resumed_deletion_when_record_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_remove = helper._remove_gc_retirement_record
+
+    def fail_record_cleanup(*args, **kwargs) -> None:
+        raise OSError("injected record cleanup failure")
+
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_record_cleanup)
+    with pytest.raises(OSError, match="record cleanup failure"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+    assert not stale.release.exists()
+    assert not any(
+        path.is_dir() and path.name.startswith(".gc-retired-")
+        for path in stale.root.iterdir()
+    )
+    records = list(stale.root.glob(".gc-retired-*.record"))
+    assert len(records) == 1
+
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    monkeypatch.setattr(helper, "collect_runtime_references", lambda root, plist: set())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(OSError, match="record cleanup failure"):
+        helper.main()
+
+    assert json.loads(capsys.readouterr().out) == {
+        "deleted": [str(stale.release)],
+        "error": {
+            "message": "injected record cleanup failure",
+            "type": "OSError",
+        },
+        "retained": [
+            {
+                "path": str(records[0]),
+                "reason": (
+                    "record-cleanup-failed-after-deletion: "
+                    "injected record cleanup failure"
+                ),
+            }
+        ],
+        "status": "partial",
+    }
+    assert not (hermes_home / "state/hermes-kanban-update.lock").exists()
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", original_remove)
 
 
 def test_gc_apply_refreshes_runtime_references_before_resumed_deletion(
@@ -869,7 +1279,11 @@ def test_gc_apply_refreshes_runtime_references_before_resumed_deletion(
     assert resumed == {
         "deleted": [],
         "retained": [
-            {"path": str(retired), "reason": "referenced-partial-retirement"}
+            {"path": str(retired), "reason": "referenced-partial-retirement"},
+            {
+                "path": str(record),
+                "reason": "record-retained-with-referenced-partial-retirement",
+            },
         ],
     }
     assert retired.is_dir()
@@ -937,6 +1351,103 @@ def test_gc_apply_preserves_a_malformed_foreign_retirement_record(
         {"path": str(record), "reason": "unverified-record: GC retirement record is invalid"}
     ]
     assert record.read_text(encoding="utf-8") == "foreign\n"
+
+
+def test_gc_apply_reports_canonical_retention_when_record_cleanup_fails_after_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def fail_retirement_then_cleanup_fsync(
+        capability, *, allow_moved: bool = False
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected post-retirement fsync failure")
+        if calls == 4:
+            raise OSError("injected record cleanup fsync failure")
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(
+        helper, "_fsync_gc_root", fail_retirement_then_cleanup_fsync
+    )
+
+    with pytest.raises(OSError, match="post-retirement fsync failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 2
+    record, canonical = partial["retained"]
+    assert record["path"].endswith(".record")
+    assert record["reason"] == (
+        "indeterminate-record-cleanup-durability: "
+        "injected record cleanup fsync failure"
+    )
+    assert not Path(record["path"]).exists()
+    assert canonical == {
+        "path": str(stale.release),
+        "reason": (
+            "restored-canonical-record-cleanup-failed: "
+            "injected record cleanup fsync failure"
+        ),
+    }
+    assert stale.release.is_dir()
+    assert not list(stale.root.glob(".gc-retired-*"))
+
+
+def test_gc_apply_records_referenced_restoration_before_record_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    calls = 0
+
+    def runtime_references() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        return set() if calls == 1 else {stale.release}
+
+    def fail_record_cleanup(*args, **kwargs) -> None:
+        raise OSError("injected referenced record cleanup failure")
+
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_record_cleanup)
+
+    with pytest.raises(OSError, match="referenced record cleanup failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=runtime_references,
+            lock_verifier=lambda: None,
+        )
+
+    records = list(stale.root.glob(".*.record"))
+    assert len(records) == 1
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(records[0]),
+                "reason": (
+                    "record-cleanup-failed-after-restoration: "
+                    "injected referenced record cleanup failure"
+                ),
+            },
+            {"path": str(stale.release), "reason": "referenced-after-retirement"},
+        ],
+    }
+    assert stale.release.is_dir()
 
 
 def test_gc_apply_restores_after_post_retirement_directory_fsync_failure(
@@ -1498,6 +2009,140 @@ def test_gc_apply_retains_root_authority_if_namespace_is_displaced_after_retirem
     assert list(root.iterdir()) == []
 
 
+def test_gc_apply_rechecks_root_after_post_retirement_reference_probe(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    root = stale.root
+    displaced = tmp_path / "displaced-during-reference-probe"
+    calls = 0
+
+    def displace_during_late_probe() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+        return set()
+
+    with pytest.raises(RuntimeError, match="release root.*changed|release root.*moved"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=displace_during_late_probe,
+            lock_verifier=lambda: None,
+        )
+
+    assert (displaced / stale.release.name).is_dir()
+    assert list(root.iterdir()) == []
+
+
+def test_gc_resume_reports_retirement_and_record_when_runtime_probe_fails(
+    tmp_path: Path
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    identity = stale.release.stat()
+    retirement = stale.root / (
+        f".gc-retired-{stale.release.name.removeprefix('release-')}-{'5' * 32}"
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            stale.release, retirement, (identity.st_dev, identity.st_ino)
+        )
+    )
+    record.chmod(0o600)
+    stale.release.rename(retirement)
+    primary = RuntimeError("primary resumed runtime probe failure")
+    calls = 0
+
+    def fail_runtime_probe() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise primary
+        return set()
+
+    with pytest.raises(RuntimeError, match="resumed runtime probe failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=fail_runtime_probe,
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(retirement),
+                "reason": "resume-pre-deletion-failed: primary resumed runtime probe failure",
+            },
+            {
+                "path": str(record),
+                "reason": (
+                    "record-retained-after-resume-pre-deletion-failure: "
+                    "primary resumed runtime probe failure"
+                ),
+            },
+        ],
+    }
+    assert retirement.is_dir()
+    assert record.is_file()
+    assert not stale.release.exists()
+
+
+def test_gc_resume_rechecks_root_after_runtime_reference_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    root = stale.root
+
+    def crash_before_delete(_retirement: str, *, dir_fd: int) -> None:
+        raise OSError("injected pre-delete crash")
+
+    monkeypatch.setattr(helper.shutil, "rmtree", crash_before_delete)
+    with pytest.raises(OSError, match="pre-delete crash"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+    monkeypatch.undo()
+
+    displaced = tmp_path / "displaced-during-resume-probe"
+    calls = 0
+
+    def displace_during_resume_probe() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+        return set()
+
+    with pytest.raises(RuntimeError, match="release root.*changed|release root.*moved"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=displace_during_resume_probe,
+            lock_verifier=lambda: None,
+        )
+
+    assert any(
+        path.is_dir() and path.name.startswith(".gc-retired-")
+        for path in displaced.iterdir()
+    )
+    assert list(root.iterdir()) == []
+
+
 def test_selector_payload_names_exact_absolute_release(tmp_path: Path) -> None:
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
@@ -1625,6 +2270,11 @@ def test_managed_launcher_blocks_all_mutating_or_mixed_update_forms_before_selec
     [
         ["--provider", "auto", "update", "--check"],
         ["--provider=auto", "update", "--yes"],
+        ["--reasoning", "high", "update", "--yes"],
+        ["--reasoning=high", "update", "--force"],
+        ["--profile", "reviewed", "update", "--yes"],
+        ["--profile=reviewed", "update", "--force"],
+        ["-p", "reviewed", "update", "--check"],
         ["-m", "model-name", "update", "--force"],
         ["--verbose", "update"],
         ["--", "update", "--gateway"],
@@ -2938,3 +3588,1900 @@ def test_collision_free_release_records_no_collisions(tmp_path: Path) -> None:
 
     receipt = json.loads((layout.release / helper._COMPLETION_RECEIPT).read_bytes())
     assert receipt["case_collisions"] == []
+
+
+
+def test_gc_record_publication_probe_failure_reports_fallback_record_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_write = helper._write_private_candidate_at
+    original_stat = helper.os.stat
+    publication_failed = False
+    primary = OSError("primary record publication failure")
+
+    def publish_then_fail(*args, **kwargs) -> None:
+        nonlocal publication_failed
+        original_write(*args, **kwargs)
+        publication_failed = True
+        raise primary
+
+    def fail_record_probe(path, *args, **kwargs):
+        if publication_failed and str(path).endswith(".record"):
+            raise OSError("secondary record state probe failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper, "_write_private_candidate_at", publish_then_fail)
+    monkeypatch.setattr(helper.os, "stat", fail_record_probe)
+
+    with pytest.raises(OSError, match="primary record publication failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert any(
+        "secondary record state probe failure" in note
+        for note in raised.value.__notes__
+    )
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert retained["reason"] == (
+        "indeterminate-record-state: secondary record state probe failure"
+    )
+    assert stale.release.is_dir()
+
+
+def test_gc_record_publication_cleanup_fsync_failure_reports_indeterminate_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-publication-work")
+    primary = OSError("primary record publication write failure")
+    durability = OSError("secondary record cleanup durability failure")
+
+    def fail_write(descriptor: int, payload) -> int:
+        raise primary
+
+    def fail_cleanup_fsync(capability, *, allow_moved=False) -> None:
+        raise durability
+
+    monkeypatch.setattr(helper.os, "write", fail_write)
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_cleanup_fsync)
+
+    with pytest.raises(OSError, match="record publication write failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert any(
+        "secondary record cleanup durability failure" in note
+        for note in raised.value.__notes__
+    )
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert retained["reason"] == (
+        "indeterminate-record-cleanup-durability: "
+        "secondary record cleanup durability failure"
+    )
+    assert not Path(retained["path"]).exists()
+    assert stale.release.is_dir()
+
+
+def test_gc_record_publication_preserves_write_failure_when_cleanup_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent.releases"
+    root.mkdir(mode=0o700)
+    capability = helper._open_gc_root(root)
+    original_close = helper.os.close
+    opened_descriptor = None
+
+    def fail_write(descriptor: int, payload) -> int:
+        nonlocal opened_descriptor
+        opened_descriptor = descriptor
+        raise OSError("primary record write failure")
+
+    def fail_close(descriptor: int) -> None:
+        if descriptor == opened_descriptor:
+            raise OSError("secondary record close failure")
+        original_close(descriptor)
+
+    def fail_unlink(*args, **kwargs) -> None:
+        raise OSError("secondary record unlink failure")
+
+    monkeypatch.setattr(helper.os, "write", fail_write)
+    monkeypatch.setattr(helper.os, "close", fail_close)
+    monkeypatch.setattr(helper.os, "unlink", fail_unlink)
+
+    with pytest.raises(OSError, match="primary record write failure") as raised:
+        helper._write_private_candidate_at(
+            capability, ".gc-retired-test.record", b"payload\n", 0o600
+        )
+
+    assert any("secondary record close failure" in note for note in raised.value.__notes__)
+    assert any("secondary record unlink failure" in note for note in raised.value.__notes__)
+    monkeypatch.undo()
+    if opened_descriptor is not None:
+        original_close(opened_descriptor)
+    original_close(capability.descriptor)
+
+
+def test_gc_apply_preserves_primary_failure_when_capability_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_open = helper._open_gc_root
+    original_close = helper.os.close
+    capability_descriptor = None
+
+    def capture_capability(root: Path):
+        nonlocal capability_descriptor
+        capability = original_open(root)
+        capability_descriptor = capability.descriptor
+        return capability
+
+    def fail_capability_close(descriptor: int) -> None:
+        if descriptor == capability_descriptor:
+            raise OSError("secondary capability close failure")
+        original_close(descriptor)
+
+    monkeypatch.setattr(helper, "_open_gc_root", capture_capability)
+    monkeypatch.setattr(helper.os, "close", fail_capability_close)
+
+    with pytest.raises(RuntimeError, match="primary runtime probe failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: (_ for _ in ()).throw(
+                RuntimeError("primary runtime probe failure")
+            ),
+            lock_verifier=lambda: None,
+        )
+
+    assert any("secondary capability close failure" in note for note in raised.value.__notes__)
+    monkeypatch.undo()
+    assert capability_descriptor is not None
+    original_close(capability_descriptor)
+
+
+def test_gc_apply_reports_canonical_state_when_restore_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def fail_retirement_and_restoration_fsync(
+        capability, *, allow_moved: bool = False
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("primary post-retirement fsync failure")
+        if calls == 3:
+            raise OSError("secondary restoration fsync failure")
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(
+        helper, "_fsync_gc_root", fail_retirement_and_restoration_fsync
+    )
+
+    with pytest.raises(OSError, match="primary post-retirement fsync failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert any(
+        "GC restoration also failed" in note
+        and "secondary restoration fsync failure" in note
+        for note in raised.value.__notes__
+    )
+    records = list(stale.root.glob(".*.record"))
+    assert len(records) == 1
+    retirement = records[0].with_name(records[0].name.removesuffix(".record"))
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(retirement),
+                "reason": (
+                    "indeterminate-retirement-after-restoration-durability-failure: "
+                    "secondary restoration fsync failure"
+                ),
+            },
+            {
+                "path": str(records[0]),
+                "reason": (
+                    "record-retained-after-restoration-failure: "
+                    "secondary restoration fsync failure"
+                ),
+            },
+            {
+                "path": str(stale.release),
+                "reason": (
+                    "restored-canonical-durability-failed: "
+                    "secondary restoration fsync failure"
+                ),
+            },
+        ],
+    }
+    assert stale.release.is_dir()
+    assert not any(
+        path.is_dir() and path.name.startswith(".gc-retired-")
+        for path in stale.root.iterdir()
+    )
+
+
+def test_gc_apply_finalizes_deletion_when_post_rmtree_path_lookup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "post-rmtree-path-work")
+    original_rmtree = helper.shutil.rmtree
+    original_root_path = helper._gc_root_path
+    deletion_completed = False
+    injected = False
+    primary = RuntimeError("injected post-rmtree path lookup failure")
+
+    def complete_then_mark(path, *args, **kwargs) -> None:
+        nonlocal deletion_completed
+        original_rmtree(path, *args, **kwargs)
+        deletion_completed = True
+
+    def fail_first_post_rmtree_path_lookup(capability, *, allow_moved=False):
+        nonlocal injected
+        if deletion_completed and allow_moved and not injected:
+            injected = True
+            raise primary
+        return original_root_path(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper.shutil, "rmtree", complete_then_mark)
+    monkeypatch.setattr(helper, "_gc_root_path", fail_first_post_rmtree_path_lookup)
+
+    with pytest.raises(RuntimeError, match="post-rmtree path lookup failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(stale.release)],
+        "retained": [],
+    }
+    assert not stale.release.exists()
+    assert not list(stale.root.glob(".*.record"))
+
+
+def test_gc_apply_reports_actual_deleted_path_when_rmtree_displaces_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-displaced-work")
+    root = stale.root
+    displaced = tmp_path / "displaced-during-rmtree"
+    original_rmtree = helper.shutil.rmtree
+
+    def displace_then_remove(retirement: str, *, dir_fd: int) -> None:
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        original_rmtree(retirement, dir_fd=dir_fd)
+
+    monkeypatch.setattr(helper.shutil, "rmtree", displace_then_remove)
+
+    with pytest.raises(RuntimeError, match="release root.*changed|release root.*moved") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    records = list(displaced.glob(".*.record"))
+    assert len(records) == 1
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(displaced / stale.release.name)],
+        "retained": [
+            {
+                "path": str(records[0]),
+                "reason": (
+                    "record-retained-after-deletion-post-fsync-validation-failure: "
+                    "release root moved during GC"
+                ),
+            }
+        ],
+    }
+    assert not (displaced / stale.release.name).exists()
+    assert not stale.release.exists()
+
+
+def test_gc_apply_records_deletion_when_rmtree_removes_then_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_rmtree = helper.shutil.rmtree
+
+    def remove_then_fail(retirement: str, *, dir_fd: int) -> None:
+        original_rmtree(retirement, dir_fd=dir_fd)
+        raise OSError("injected post-rmtree failure")
+
+    monkeypatch.setattr(helper.shutil, "rmtree", remove_then_fail)
+
+    with pytest.raises(OSError, match="post-rmtree failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    records = list(stale.root.glob(".*.record"))
+    assert len(records) == 1
+    retirement = records[0].with_name(records[0].name.removesuffix(".record"))
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(stale.release)],
+        "retained": [
+            {
+                "path": str(retirement),
+                "reason": (
+                    "indeterminate-retirement-after-deletion-exception: "
+                    "injected post-rmtree failure"
+                ),
+            },
+            {
+                "path": str(records[0]),
+                "reason": "record-retained-after-deletion-exception: injected post-rmtree failure",
+            },
+        ],
+    }
+
+
+def test_gc_apply_preserves_rmtree_failure_when_outcome_probe_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_stat = helper.os.stat
+    deletion_failed = False
+
+    def fail_rmtree(retirement: str, *, dir_fd: int) -> None:
+        nonlocal deletion_failed
+        deletion_failed = True
+        raise OSError("primary rmtree failure")
+
+    def fail_outcome_probe(path, *args, **kwargs):
+        if deletion_failed and str(path).startswith(".gc-retired-"):
+            raise OSError("secondary deletion outcome probe failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.shutil, "rmtree", fail_rmtree)
+    monkeypatch.setattr(helper.os, "stat", fail_outcome_probe)
+
+    with pytest.raises(OSError, match="primary rmtree failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert any(
+        "secondary deletion outcome probe failure" in note
+        for note in raised.value.__notes__
+    )
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    retirement = next(
+        path
+        for path in stale.root.iterdir()
+        if path.is_dir() and path.name.startswith(".gc-retired-")
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    assert partial["retained"] == [
+        {
+            "path": str(retirement),
+            "reason": (
+                "indeterminate-retirement-state-after-deletion-probe-failure: "
+                "secondary deletion outcome probe failure"
+            ),
+        },
+        {
+            "path": str(record),
+            "reason": (
+                "indeterminate-deletion-state: "
+                "secondary deletion outcome probe failure"
+            ),
+        },
+    ]
+    assert not stale.release.exists()
+    assert retirement.is_dir()
+    assert record.is_file()
+
+
+def test_gc_resume_records_deletion_when_rmtree_removes_then_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+
+    def crash_before_delete(_retirement: str, *, dir_fd: int) -> None:
+        raise OSError("injected pre-delete crash")
+
+    monkeypatch.setattr(helper.shutil, "rmtree", crash_before_delete)
+    with pytest.raises(OSError, match="pre-delete crash"):
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+    monkeypatch.undo()
+    original_rmtree = helper.shutil.rmtree
+
+    def remove_then_fail(retirement: str, *, dir_fd: int) -> None:
+        original_rmtree(retirement, dir_fd=dir_fd)
+        raise OSError("injected resumed post-rmtree failure")
+
+    monkeypatch.setattr(helper.shutil, "rmtree", remove_then_fail)
+    with pytest.raises(OSError, match="resumed post-rmtree failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    records = list(stale.root.glob(".*.record"))
+    assert len(records) == 1
+    retirement = records[0].with_name(records[0].name.removesuffix(".record"))
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(stale.release)],
+        "retained": [
+            {
+                "path": str(retirement),
+                "reason": (
+                    "indeterminate-retirement-after-deletion-exception: "
+                    "injected resumed post-rmtree failure"
+                ),
+            },
+            {
+                "path": str(records[0]),
+                "reason": "record-retained-after-deletion-exception: injected resumed post-rmtree failure",
+            },
+        ],
+    }
+
+
+def test_gc_resume_records_restored_canonical_before_record_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    identity = stale.release.stat()
+    retirement = stale.root / (
+        f".gc-retired-{stale.release.name.removeprefix('release-')}-{'6' * 32}"
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            stale.release, retirement, (identity.st_dev, identity.st_ino)
+        )
+    )
+    record.chmod(0o600)
+    stale.release.rename(retirement)
+    retirement.rename(stale.release)
+
+    displaced = tmp_path / "displaced-restored-canonical-root"
+
+    def fail_record_cleanup(*args, **kwargs) -> None:
+        stale.root.rename(displaced)
+        stale.root.mkdir(mode=0o700)
+        raise OSError("injected restored record cleanup failure")
+
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_record_cleanup)
+    with pytest.raises(OSError, match="restored record cleanup failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(displaced / record.name),
+                "reason": (
+                    "record-cleanup-failed-after-restored-canonical-recovery: "
+                    "injected restored record cleanup failure"
+                ),
+            },
+            {
+                "path": str(displaced / stale.release.name),
+                "reason": "restored-canonical-after-crash",
+            },
+        ],
+    }
+    assert (displaced / stale.release.name).is_dir()
+    assert not stale.release.exists()
+    assert not (displaced / retirement.name).exists()
+    assert (displaced / record.name).is_file()
+
+
+def test_gc_resume_reports_foreign_successor_and_existing_retirement_separately(
+    tmp_path: Path
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    prior = build_completed_release(helper, checkout, tmp_path / "prior-existing-work")
+    prior_identity = prior.release.stat()
+    successor = build_completed_release(
+        helper, checkout, tmp_path / "foreign-existing-successor-work"
+    )
+    retirement = successor.root / (
+        f".gc-retired-{successor.release.name.removeprefix('release-')}-{'6' * 32}"
+    )
+    prior.release.rename(retirement)
+    record = retirement.with_name(f"{retirement.name}.record")
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            successor.release,
+            retirement,
+            (prior_identity.st_dev, prior_identity.st_ino),
+        )
+    )
+    record.chmod(0o600)
+    for reference_name in ("current", "previous"):
+        reference = successor.root / reference_name
+        if reference.exists() or reference.is_symlink():
+            reference.unlink()
+
+    result = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=lambda: set(),
+        lock_verifier=lambda: None,
+    )
+
+    assert result["deleted"] == []
+    assert result["retained"] == [
+        {
+            "path": str(retirement),
+            "reason": "retirement-retained-with-foreign-canonical-successor",
+        },
+        {
+            "path": str(record),
+            "reason": "record-retained-with-foreign-canonical-successor",
+        },
+        {"path": str(successor.release), "reason": "foreign-canonical-successor"},
+    ]
+    assert successor.release.is_dir()
+    assert retirement.is_dir()
+    assert record.is_file()
+
+
+@pytest.mark.parametrize("boundary", ["record-read", "retirement-verify"])
+def test_gc_resume_retries_moved_root_before_classifying_recovery_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / f"resume-{boundary}-work")
+    identity = stale.release.stat()
+    root = stale.root
+    retirement = root / (
+        f".gc-retired-{stale.release.name.removeprefix('release-')}-{'3' * 32}"
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    stale.release.rename(retirement)
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            stale.release,
+            retirement,
+            (identity.st_dev, identity.st_ino),
+        )
+    )
+    record.chmod(0o600)
+    displaced = tmp_path / f"displaced-during-{boundary}"
+    moved = False
+
+    def move_root() -> None:
+        nonlocal moved
+        if moved:
+            return
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        moved = True
+
+    if boundary == "record-read":
+        original_read = helper._read_gc_retirement_record
+
+        def move_during_record_read(
+            root_path: Path,
+            record_path: Path,
+            *,
+            authority_root: Path | None = None,
+        ):
+            move_root()
+            return original_read(
+                root_path,
+                record_path,
+                authority_root=authority_root,
+            )
+
+        monkeypatch.setattr(
+            helper, "_read_gc_retirement_record", move_during_record_read
+        )
+    else:
+        original_verify = helper._verify_gc_release
+
+        def move_during_retirement_verify(
+            agent_repo: Path, release_path: Path, *, canonical_name: str
+        ) -> None:
+            move_root()
+            original_verify(
+                agent_repo, release_path, canonical_name=canonical_name
+            )
+
+        monkeypatch.setattr(helper, "_verify_gc_release", move_during_retirement_verify)
+
+    with pytest.raises(RuntimeError, match="release root moved during GC") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    moved_retirement = displaced / retirement.name
+    moved_record = displaced / record.name
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(moved_retirement),
+                "reason": "resume-pre-deletion-failed: release root moved during GC",
+            },
+            {
+                "path": str(moved_record),
+                "reason": (
+                    "record-retained-after-resume-pre-deletion-failure: "
+                    "release root moved during GC"
+                ),
+            },
+        ],
+    }
+    assert moved_retirement.is_dir()
+    assert moved_record.is_file()
+
+
+def test_gc_resume_probe_failure_reports_retirement_and_record_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "resume-probe-failure-work")
+    identity = stale.release.stat()
+    retirement = stale.root / (
+        f".gc-retired-{stale.release.name.removeprefix('release-')}-{'4' * 32}"
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    stale.release.rename(retirement)
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            stale.release,
+            retirement,
+            (identity.st_dev, identity.st_ino),
+        )
+    )
+    record.chmod(0o600)
+    primary = OSError("injected canonical recovery probe failure")
+    original_stat = helper.os.stat
+
+    def fail_canonical_probe(path, *args, **kwargs):
+        if path == stale.release.name and kwargs.get("dir_fd") is not None:
+            raise primary
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "stat", fail_canonical_probe)
+
+    with pytest.raises(OSError, match="canonical recovery probe failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(retirement),
+                "reason": (
+                    "indeterminate-retirement-state-after-recovery-probe-failure: "
+                    "injected canonical recovery probe failure"
+                ),
+            },
+            {
+                "path": str(record),
+                "reason": (
+                    "record-retained-after-recovery-probe-failure: "
+                    "injected canonical recovery probe failure"
+                ),
+            },
+            {
+                "path": str(stale.release),
+                "reason": (
+                    "indeterminate-canonical-state-after-recovery-probe-failure: "
+                    "injected canonical recovery probe failure"
+                ),
+            },
+        ],
+    }
+    assert retirement.is_dir()
+    assert record.is_file()
+
+
+def test_gc_resume_reports_actual_deleted_path_when_absent_probes_displace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "record-only-displaced-work")
+    root = stale.root
+    identity = stale.release.stat()
+    retirement = root / (
+        f".gc-retired-{stale.release.name.removeprefix('release-')}-{'5' * 32}"
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            stale.release,
+            retirement,
+            (identity.st_dev, identity.st_ino),
+        )
+    )
+    record.chmod(0o600)
+    helper.shutil.rmtree(stale.release)
+    displaced = tmp_path / "displaced-during-absent-resume-probes"
+    original_stat = helper.os.stat
+    canonical_probed = False
+    moved = False
+
+    def displace_during_retirement_probe(path, *args, **kwargs):
+        nonlocal canonical_probed, moved
+        if path == stale.release.name and kwargs.get("dir_fd") is not None:
+            canonical_probed = True
+        if (
+            path == retirement.name
+            and canonical_probed
+            and not moved
+            and kwargs.get("dir_fd") is not None
+        ):
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+            moved = True
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "stat", displace_during_retirement_probe)
+
+    with pytest.raises(RuntimeError, match="release root.*changed|release root.*moved") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    displaced_record = displaced / record.name
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(displaced / stale.release.name)],
+        "retained": [
+            {
+                "path": str(displaced_record),
+                "reason": (
+                    "record-retained-after-deletion-post-fsync-validation-failure: "
+                    "release root moved during GC"
+                ),
+            }
+        ],
+    }
+    assert displaced_record.is_file()
+    assert not (displaced / stale.release.name).exists()
+    assert not stale.release.exists()
+
+
+def test_gc_resume_reports_existing_foreign_successor_when_retirement_is_absent(
+    tmp_path: Path
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    prior = build_completed_release(helper, checkout, tmp_path / "prior-work")
+    prior_identity = prior.release.stat()
+    successor = build_completed_release(
+        helper, checkout, tmp_path / "foreign-successor-work"
+    )
+    assert successor.release != prior.release
+    retirement = successor.root / (
+        f".gc-retired-{successor.release.name.removeprefix('release-')}-{'7' * 32}"
+    )
+    record = retirement.with_name(f"{retirement.name}.record")
+    record.write_bytes(
+        helper._gc_retirement_record_payload(
+            successor.release,
+            retirement,
+            (prior_identity.st_dev, prior_identity.st_ino),
+        )
+    )
+    record.chmod(0o600)
+    for reference_name in ("current", "previous"):
+        reference = successor.root / reference_name
+        if reference.exists() or reference.is_symlink():
+            reference.unlink()
+    runtime_references = {prior.release}
+    plan = helper.plan_release_gc(
+        checkout, runtime_references=runtime_references
+    )
+    assert str(successor.release) in plan["candidates"]
+
+    result = helper.apply_release_gc(
+        checkout,
+        runtime_reference_supplier=lambda: runtime_references,
+        lock_verifier=lambda: None,
+    )
+
+    assert result["deleted"] == []
+    assert result["retained"] == [
+        {
+            "path": str(record),
+            "reason": "record-retained-with-foreign-canonical-successor",
+        },
+        {"path": str(successor.release), "reason": "foreign-canonical-successor"},
+    ]
+    assert prior.release.is_dir()
+    assert successor.release.is_dir()
+    assert not retirement.exists()
+    assert record.is_file()
+
+
+
+def test_restore_retired_release_returns_actual_path_after_fsync_displacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "releases"
+    root.mkdir(mode=0o700)
+    retirement_name = ".gc-retired-release-a-" + "0" * 32
+    release_name = "release-" + "a" * 40
+    retirement = root / retirement_name
+    retirement.mkdir(mode=0o700)
+    identity = retirement.stat()
+    capability = helper._open_gc_root(root)
+    displaced = tmp_path / "displaced-restore-success"
+    original_fsync = helper._fsync_gc_root
+
+    def displace_during_restore_fsync(capability, *, allow_moved=False) -> None:
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", displace_during_restore_fsync)
+    try:
+        restored = helper._restore_retired_release(
+            capability,
+            retirement_name,
+            release_name,
+            (identity.st_dev, identity.st_ino),
+        )
+    finally:
+        helper.os.close(capability.descriptor)
+
+    assert restored == displaced / release_name
+    assert restored.is_dir()
+    assert not (root / release_name).exists()
+
+
+def test_restore_retired_release_reports_actual_path_when_fsync_fails_after_displacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "releases"
+    root.mkdir(mode=0o700)
+    retirement_name = ".gc-retired-release-b-" + "1" * 32
+    release_name = "release-" + "b" * 40
+    retirement = root / retirement_name
+    retirement.mkdir(mode=0o700)
+    identity = retirement.stat()
+    capability = helper._open_gc_root(root)
+    displaced = tmp_path / "displaced-restore-failure"
+    primary = OSError("injected restoration fsync failure")
+
+    def fail_after_displacement(capability, *, allow_moved=False) -> None:
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        raise primary
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_after_displacement)
+    try:
+        with pytest.raises(OSError, match="restoration fsync failure") as raised:
+            helper._restore_retired_release(
+                capability,
+                retirement_name,
+                release_name,
+                (identity.st_dev, identity.st_ino),
+            )
+    finally:
+        helper.os.close(capability.descriptor)
+
+    assert raised.value is primary
+    assert getattr(raised.value, "gc_restored_path") == displaced / release_name
+    assert (displaced / release_name).is_dir()
+    assert not (root / release_name).exists()
+
+
+def test_gc_restore_marks_second_path_lookup_failure_as_fsync_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "second-path-work")
+    capability = helper._open_gc_root(stale.root)
+    identity_stat = stale.release.stat()
+    identity = (identity_stat.st_dev, identity_stat.st_ino)
+    retirement_name = ".gc-retired-second-path"
+    helper.os.rename(
+        stale.release.name,
+        retirement_name,
+        src_dir_fd=capability.descriptor,
+        dst_dir_fd=capability.descriptor,
+    )
+    original_fsync = helper._fsync_gc_root
+    original_root_path = helper._gc_root_path
+    restoration_fsync_completed = False
+    primary = RuntimeError("injected post-restoration-fsync path lookup failure")
+
+    def mark_completed_fsync(capability_arg, *, allow_moved=False):
+        nonlocal restoration_fsync_completed
+        original_fsync(capability_arg, allow_moved=allow_moved)
+        if allow_moved:
+            restoration_fsync_completed = True
+
+    def fail_second_lookup(capability_arg, *, allow_moved=False):
+        if restoration_fsync_completed and allow_moved:
+            raise primary
+        return original_root_path(capability_arg, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", mark_completed_fsync)
+    monkeypatch.setattr(helper, "_gc_root_path", fail_second_lookup)
+    try:
+        with pytest.raises(RuntimeError, match="post-restoration-fsync path lookup") as raised:
+            helper._restore_retired_release(
+                capability,
+                retirement_name,
+                stale.release.name,
+                identity,
+            )
+    finally:
+        helper.os.close(capability.descriptor)
+
+    assert raised.value is primary
+    assert getattr(primary, "gc_root_fsync_completed") is True
+    assert getattr(primary, "gc_restored_path") == stale.release
+    assert not hasattr(primary, "gc_retirement_path")
+    assert stale.release.is_dir()
+
+
+def test_gc_referenced_restoration_pre_rename_failure_reports_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "referenced-pre-rename-work")
+    calls = 0
+    primary = OSError("injected pre-rename restoration probe failure")
+
+    def become_referenced_after_retirement() -> set[Path]:
+        nonlocal calls
+        calls += 1
+        return {stale.release} if calls >= 2 else set()
+
+    monkeypatch.setattr(
+        helper,
+        "_restore_retired_release",
+        lambda *args, **kwargs: (_ for _ in ()).throw(primary),
+    )
+
+    with pytest.raises(OSError, match="pre-rename restoration probe failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=become_referenced_after_retirement,
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    partial = getattr(primary, "gc_partial_result")
+    retirement = next(path for path in stale.root.glob(".gc-retired-*") if path.is_dir())
+    record = retirement.with_name(f"{retirement.name}.record")
+    assert partial == {
+        "deleted": [],
+        "retained": [
+            {
+                "path": str(retirement),
+                "reason": "restoration-failed: injected pre-rename restoration probe failure",
+            },
+            {
+                "path": str(record),
+                "reason": (
+                    "record-retained-after-restoration-failure: "
+                    "injected pre-rename restoration probe failure"
+                ),
+            },
+        ],
+    }
+
+
+def test_gc_apply_reports_displaced_root_after_successful_restoration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    root = stale.root
+    displaced = tmp_path / "displaced-release-root-reporting"
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def displace_during_post_retirement_fsync(
+        capability, *, allow_moved: bool = False
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(
+        helper, "_fsync_gc_root", displace_during_post_retirement_fsync
+    )
+
+    with pytest.raises(RuntimeError, match="release root.*changed|release root.*moved") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    restored = displaced / stale.release.name
+    assert restored.is_dir()
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [],
+        "retained": [
+            {"path": str(restored), "reason": "restored-after-retirement-failure"}
+        ],
+    }
+
+
+
+def test_gc_cli_attaches_completed_state_when_success_output_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    completed = {
+        "deleted": [str(tmp_path / "deleted-release")],
+        "retained": [],
+    }
+    primary = OSError("injected success output failure")
+
+    def successful_gc(*args, **kwargs):
+        return completed
+
+    def fail_output(*args, **kwargs):
+        assert kwargs["flush"] is True
+        raise primary
+
+    monkeypatch.setattr(helper, "apply_release_gc", successful_gc)
+    monkeypatch.setattr(helper, "print", fail_output, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(OSError, match="success output failure") as raised:
+        helper.main()
+
+    assert raised.value is primary
+    assert getattr(raised.value, "gc_partial_result") is completed
+    assert not (hermes_home / "state/hermes-kanban-update.lock").exists()
+
+
+def test_gc_cli_reports_completed_state_when_lock_release_fails_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    completed = {
+        "deleted": [str(tmp_path / "deleted-release")],
+        "retained": [],
+    }
+    original_run = helper.subprocess.run
+
+    def successful_gc(*args, **kwargs):
+        return completed
+
+    def fail_lock_release(command, **kwargs):
+        if "lock-release" in command:
+            raise subprocess.CalledProcessError(71, command)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(helper, "apply_release_gc", successful_gc)
+    monkeypatch.setattr(helper.subprocess, "run", fail_lock_release)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        helper.main()
+
+    assert raised.value.returncode == 71
+    assert json.loads(capsys.readouterr().out) == {
+        "deleted": completed["deleted"],
+        "error": {
+            "message": str(raised.value),
+            "type": "CalledProcessError",
+        },
+        "retained": [],
+        "status": "partial",
+    }
+    assert (hermes_home / "state/hermes-kanban-update.lock").is_symlink()
+
+
+
+def test_gc_cli_preserves_failure_when_partial_output_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    primary = RuntimeError("primary GC failure")
+    setattr(
+        primary,
+        "gc_partial_result",
+        {"deleted": [str(tmp_path / "deleted-release")], "retained": []},
+    )
+
+    def fail_gc(*args, **kwargs):
+        raise primary
+
+    def fail_output(*args, **kwargs):
+        raise OSError("secondary partial output failure")
+
+    monkeypatch.setattr(helper, "apply_release_gc", fail_gc)
+    monkeypatch.setattr(helper, "print", fail_output, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(RuntimeError, match="primary GC failure") as raised:
+        helper.main()
+
+    assert raised.value is primary
+    assert any(
+        "secondary partial output failure" in note
+        for note in raised.value.__notes__
+    )
+
+
+def test_gc_cli_preserves_lock_release_failure_when_partial_output_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(helper.sys, "platform", "darwin")
+    completed = {
+        "deleted": [str(tmp_path / "deleted-release")],
+        "retained": [],
+    }
+    original_run = helper.subprocess.run
+
+    def successful_gc(*args, **kwargs):
+        return completed
+
+    def fail_lock_release(command, **kwargs):
+        if "lock-release" in command:
+            raise subprocess.CalledProcessError(71, command)
+        return original_run(command, **kwargs)
+
+    def fail_output(*args, **kwargs):
+        raise OSError("secondary partial output failure")
+
+    monkeypatch.setattr(helper, "apply_release_gc", successful_gc)
+    monkeypatch.setattr(helper.subprocess, "run", fail_lock_release)
+    monkeypatch.setattr(helper, "print", fail_output, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes-release-manager.py", "gc", str(checkout), "--apply"],
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        helper.main()
+
+    assert raised.value.returncode == 71
+    assert any(
+        "secondary partial output failure" in note
+        for note in raised.value.__notes__
+    )
+
+
+
+def test_gc_apply_reports_retirement_when_rmtree_fails_before_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent"
+    root.mkdir()
+    stale = build_completed_release(helper, root, tmp_path / "stale-work")
+    primary = OSError("primary rmtree failure")
+
+    def fail_rmtree(path, *, dir_fd=None):
+        raise primary
+
+    monkeypatch.setattr(helper.shutil, "rmtree", fail_rmtree)
+
+    with pytest.raises(OSError, match="primary rmtree failure") as raised:
+        helper.apply_release_gc(
+            root,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    records = list(stale.root.glob(".*.record"))
+    assert len(records) == 1
+    assert len(partial["retained"]) == 2
+    retirement = partial["retained"][0]
+    assert Path(retirement["path"]).name.startswith(".gc-retired-")
+    assert retirement["reason"] == "deletion-failed: primary rmtree failure"
+    assert Path(retirement["path"]).is_dir()
+    assert partial["retained"][1] == {
+        "path": str(records[0]),
+        "reason": "record-retained-after-deletion-failure: primary rmtree failure",
+    }
+    assert not stale.release.exists()
+
+
+def test_gc_record_publication_fsync_preserves_indeterminate_cleanup_durability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-wrapped-cleanup-work")
+    primary = RuntimeError("primary retirement record publication fsync failure")
+    cleanup = OSError("secondary post-unlink cleanup fsync failure")
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def fail_publication_and_cleanup_fsync(capability, *, allow_moved=False) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise primary
+        if calls == 2:
+            raise cleanup
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_publication_and_cleanup_fsync)
+
+    with pytest.raises(RuntimeError, match="record publication fsync failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert any(
+        "secondary post-unlink cleanup fsync failure" in note
+        for note in raised.value.__notes__
+    )
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert retained["reason"] == (
+        "indeterminate-record-cleanup-durability: "
+        "secondary post-unlink cleanup fsync failure"
+    )
+    assert not Path(retained["path"]).exists()
+    assert stale.release.is_dir()
+
+
+def test_gc_record_fsync_preserves_primary_when_record_cleanup_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "hermes-agent"
+    root.mkdir()
+    stale = build_completed_release(helper, root, tmp_path / "stale-work")
+    primary = RuntimeError("primary retirement record fsync failure")
+    cleanup = OSError("secondary retirement record cleanup failure")
+    original_fsync = helper._fsync_gc_root
+    calls = 0
+
+    def fail_first_fsync(capability, *, allow_moved=False):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise primary
+        return original_fsync(capability, allow_moved=allow_moved)
+
+    def fail_record_cleanup(capability, record_name, *, allow_moved=False):
+        raise cleanup
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_first_fsync)
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_record_cleanup)
+
+    with pytest.raises(RuntimeError, match="primary retirement record fsync failure") as raised:
+        helper.apply_release_gc(
+            root,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    assert any(
+        "secondary retirement record cleanup failure" in note
+        for note in raised.value.__notes__
+    )
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    assert partial["retained"][0]["path"].endswith(".record")
+    assert partial["retained"][0]["reason"].startswith(
+        "record-cleanup-failed-after-publication: "
+    )
+    assert stale.release.is_dir()
+    assert list(stale.root.glob(".*.record"))
+    assert not [path for path in stale.root.glob(".gc-retired-*") if path.is_dir()]
+
+
+
+def test_gc_apply_reports_completed_state_when_capability_close_fails_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_open_root = helper._open_gc_root
+    original_close = helper.os.close
+    capability_fd = None
+
+    def capture_root(path):
+        nonlocal capability_fd
+        capability = original_open_root(path)
+        capability_fd = capability.descriptor
+        return capability
+
+    def fail_capability_close(descriptor):
+        if descriptor == capability_fd:
+            raise OSError("injected successful GC capability close failure")
+        return original_close(descriptor)
+
+    monkeypatch.setattr(helper, "_open_gc_root", capture_root)
+    monkeypatch.setattr(helper.os, "close", fail_capability_close)
+
+    with pytest.raises(OSError, match="successful GC capability close failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(stale.release)],
+        "retained": [],
+    }
+    assert not stale.release.exists()
+    assert capability_fd is not None
+    original_close(capability_fd)
+
+
+
+def test_gc_open_root_preserves_validation_failure_when_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    root = tmp_path / "releases"
+    root.mkdir(mode=0o700)
+    original_open = helper.os.open
+    original_close = helper.os.close
+    original_fstat = helper.os.fstat
+    root_fd = None
+    primary = RuntimeError("primary root validation failure")
+
+    def capture_open(path, flags, *args, **kwargs):
+        nonlocal root_fd
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if Path(path) == root:
+            root_fd = descriptor
+        return descriptor
+
+    def fail_validation(descriptor):
+        if descriptor == root_fd:
+            raise primary
+        return original_fstat(descriptor)
+
+    def fail_close(descriptor):
+        if descriptor == root_fd:
+            raise OSError("secondary root descriptor close failure")
+        return original_close(descriptor)
+
+    monkeypatch.setattr(helper.os, "open", capture_open)
+    monkeypatch.setattr(helper.os, "fstat", fail_validation)
+    monkeypatch.setattr(helper.os, "close", fail_close)
+
+    with pytest.raises(RuntimeError, match="primary root validation failure") as raised:
+        helper._open_gc_root(root)
+
+    assert raised.value is primary
+    assert any(
+        "secondary root descriptor close failure" in note
+        for note in raised.value.__notes__
+    )
+    assert root_fd is not None
+    original_close(root_fd)
+
+
+def test_gc_record_close_failure_reports_retained_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    original_open = helper.os.open
+    original_close = helper.os.close
+    record_fd = None
+
+    def capture_open(path, flags, *args, **kwargs):
+        nonlocal record_fd
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if isinstance(path, str) and path.endswith(".record"):
+            record_fd = descriptor
+        return descriptor
+
+    def fail_record_close(descriptor):
+        if descriptor == record_fd:
+            raise OSError("injected retirement record close failure")
+        return original_close(descriptor)
+
+    monkeypatch.setattr(helper.os, "open", capture_open)
+    monkeypatch.setattr(helper.os, "close", fail_record_close)
+
+    with pytest.raises(OSError, match="retirement record close failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert retained["reason"].startswith(
+        "record-publication-failed: injected retirement record close failure"
+    )
+    assert Path(retained["path"]).is_file()
+    assert stale.release.is_dir()
+    assert not [path for path in stale.root.glob(".gc-retired-*") if path.is_dir()]
+    assert record_fd is not None
+    original_close(record_fd)
+
+
+
+def test_gc_cleanup_does_not_report_indeterminate_record_after_fsync_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "durable-cleanup-move-work")
+    root = stale.root
+    displaced = tmp_path / "displaced-after-record-cleanup-fsync"
+    original_fsync = helper.os.fsync
+    calls = 0
+
+    def move_root_after_cleanup_fsync(descriptor: int) -> None:
+        nonlocal calls
+        original_fsync(descriptor)
+        calls += 1
+        if calls == 5:
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+
+    monkeypatch.setattr(helper.os, "fsync", move_root_after_cleanup_fsync)
+
+    with pytest.raises(RuntimeError, match="release root moved during GC") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert getattr(raised.value, "gc_partial_result") == {
+        "deleted": [str(stale.release)],
+        "retained": [],
+    }
+    assert not list(displaced.glob(".*.record"))
+    assert not (displaced / stale.release.name).exists()
+
+
+def test_gc_apply_reports_retirement_when_deletion_root_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "deletion-fsync-work")
+    original_fsync = helper._fsync_gc_root
+    primary = OSError("injected deletion root fsync failure")
+    calls = 0
+
+    def fail_deletion_fsync(capability, *, allow_moved=False) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise primary
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_deletion_fsync)
+
+    with pytest.raises(OSError, match="deletion root fsync failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == [str(stale.release)]
+    record = next(stale.root.glob(".*.record"))
+    retirement = record.with_name(record.name.removesuffix(".record"))
+    assert partial["retained"] == [
+        {
+            "path": str(retirement),
+            "reason": (
+                "indeterminate-retirement-after-deletion-durability-failure: "
+                "injected deletion root fsync failure"
+            ),
+        },
+        {
+            "path": str(record),
+            "reason": (
+                "record-retained-after-deletion-durability-failure: "
+                "injected deletion root fsync failure"
+            ),
+        },
+    ]
+    assert not retirement.exists()
+    assert record.is_file()
+
+
+def test_gc_apply_reports_indeterminate_record_when_cleanup_fsync_fails_after_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-cleanup-fsync-work")
+    original_fsync = helper._fsync_gc_root
+    primary = OSError("injected post-unlink record fsync failure")
+    calls = 0
+
+    def fail_record_cleanup_fsync(capability, *, allow_moved=False) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise primary
+        original_fsync(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper, "_fsync_gc_root", fail_record_cleanup_fsync)
+
+    with pytest.raises(OSError, match="post-unlink record fsync failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is primary
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == [str(stale.release)]
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert retained["reason"] == (
+        "indeterminate-record-cleanup-durability: "
+        "injected post-unlink record fsync failure"
+    )
+    assert not Path(retained["path"]).exists()
+    assert not stale.release.exists()
+
+
+def test_gc_apply_reports_record_when_cleanup_fails_after_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    cleanup = OSError("injected post-deletion record cleanup failure")
+
+    def fail_cleanup(capability, record_name, *, allow_moved=False):
+        raise cleanup
+
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_cleanup)
+
+    with pytest.raises(OSError, match="post-deletion record cleanup failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    assert raised.value is cleanup
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == [str(stale.release)]
+    assert len(partial["retained"]) == 1
+    assert partial["retained"][0]["path"].endswith(".record")
+    assert partial["retained"][0]["reason"].startswith(
+        "record-cleanup-failed-after-deletion: "
+    )
+    assert Path(partial["retained"][0]["path"]).is_file()
+
+
+def test_gc_apply_uses_last_verified_retirement_path_when_current_lookup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    primary = OSError("primary retained retirement failure")
+    original_root_path = helper._gc_root_path
+    deletion_failed = False
+
+    def fail_rmtree(path, *, dir_fd=None):
+        nonlocal deletion_failed
+        deletion_failed = True
+        raise primary
+
+    def fail_current_lookup(capability, *, allow_moved=False):
+        if deletion_failed and allow_moved:
+            raise RuntimeError("secondary current path lookup failure")
+        return original_root_path(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper.shutil, "rmtree", fail_rmtree)
+    monkeypatch.setattr(helper, "_gc_root_path", fail_current_lookup)
+
+    with pytest.raises(OSError, match="primary retained retirement failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=lambda: None,
+        )
+
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 2
+    retirement, record = partial["retained"]
+    assert Path(retirement["path"]).is_dir()
+    assert retirement["reason"] == "deletion-failed: primary retained retirement failure"
+    assert Path(record["path"]).is_file()
+    assert record["reason"] == (
+        "record-retained-after-deletion-failure: primary retained retirement failure"
+    )
+    assert any(
+        "secondary current path lookup failure" in note
+        for note in raised.value.__notes__
+    )
+
+
+
+def test_gc_compensation_probe_and_path_failure_reports_last_verified_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    primary = RuntimeError("primary pre-deletion lock failure")
+    original_stat = helper.os.stat
+    original_root_path = helper._gc_root_path
+    lock_calls = 0
+    primary_raised = False
+    compensation_probe_failed = False
+
+    def fail_second_lock():
+        nonlocal lock_calls, primary_raised
+        lock_calls += 1
+        if lock_calls == 4:
+            primary_raised = True
+            raise primary
+
+    def fail_compensation_probe(path, *args, **kwargs):
+        nonlocal compensation_probe_failed
+        if (
+            primary_raised
+            and isinstance(path, str)
+            and path.startswith(".gc-retired-")
+        ):
+            compensation_probe_failed = True
+            raise OSError("secondary compensation state probe failure")
+        return original_stat(path, *args, **kwargs)
+
+    def fail_record_path(capability, *, allow_moved=False):
+        if compensation_probe_failed and allow_moved:
+            raise RuntimeError("secondary retained record path lookup failure")
+        return original_root_path(capability, allow_moved=allow_moved)
+
+    monkeypatch.setattr(helper.os, "stat", fail_compensation_probe)
+    monkeypatch.setattr(helper, "_gc_root_path", fail_record_path)
+
+    with pytest.raises(RuntimeError, match="primary pre-deletion lock failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=fail_second_lock,
+        )
+
+    assert raised.value is primary
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    retirement = next(path for path in stale.root.glob(".gc-retired-*") if path.is_dir())
+    record = retirement.with_name(f"{retirement.name}.record")
+    assert partial["retained"] == [
+        {
+            "path": str(retirement),
+            "reason": (
+                "indeterminate-retirement-state-after-compensation-probe-failure: "
+                "secondary compensation state probe failure"
+            ),
+        },
+        {
+            "path": str(record),
+            "reason": (
+                "indeterminate-deletion-state: "
+                "secondary compensation state probe failure"
+            ),
+        },
+    ]
+    assert record.is_file()
+    assert any(
+        "compensation state probe" in note for note in raised.value.__notes__
+    )
+    assert any(
+        "retained artifact path lookup" in note for note in raised.value.__notes__
+    )
+    assert not stale.release.exists()
+    assert any(path.is_dir() for path in stale.root.glob(".gc-retired-*"))
+
+
+
+def test_gc_pre_retirement_failure_reports_surviving_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    stale = build_completed_release(helper, checkout, tmp_path / "stale-work")
+    primary = RuntimeError("primary pre-retirement lock failure")
+    cleanup = OSError("secondary pre-retirement record cleanup failure")
+    lock_calls = 0
+
+    def fail_pre_retirement_lock():
+        nonlocal lock_calls
+        lock_calls += 1
+        if lock_calls == 3:
+            raise primary
+
+    def fail_cleanup(capability, record_name, *, allow_moved=False):
+        raise cleanup
+
+    monkeypatch.setattr(helper, "_remove_gc_retirement_record", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="primary pre-retirement lock failure") as raised:
+        helper.apply_release_gc(
+            checkout,
+            runtime_reference_supplier=lambda: set(),
+            lock_verifier=fail_pre_retirement_lock,
+        )
+
+    assert raised.value is primary
+    assert any(
+        "secondary pre-retirement record cleanup failure" in note
+        for note in raised.value.__notes__
+    )
+    partial = getattr(raised.value, "gc_partial_result")
+    assert partial["deleted"] == []
+    assert len(partial["retained"]) == 1
+    retained = partial["retained"][0]
+    assert retained["path"].endswith(".record")
+    assert retained["reason"].startswith(
+        "record-cleanup-failed-before-retirement: "
+    )
+    assert Path(retained["path"]).is_file()
+    assert stale.release.is_dir()

@@ -486,7 +486,7 @@ def launcher_payload(layout: ReleaseLayout, baseline: str) -> bytes:
 selector,root=sys.argv[1:3]
 arguments=sys.argv[3:]
 allowed_update_forms={("update","--plan"),("update","-h"),("update","--help")}
-value_flags={"-z","--oneshot","-m","--model","--provider","-t","--toolsets","-r","--resume","-s","--skills","--usage-file","--in","-c","--continue"}
+value_flags={"-z","--oneshot","-m","--model","--provider","--reasoning","-t","--toolsets","-r","--resume","-s","--skills","--usage-file","--in","-c","--continue","--profile","-p"}
 short_value_flags=("-z","-m","-t","-r","-s","-c")
 def first_positional(argv):
  i=0
@@ -1539,8 +1539,13 @@ def _open_gc_root(root: Path) -> _GcRootCapability:
         return _GcRootCapability(
             descriptor, (opened.st_dev, opened.st_ino), Path(root)
         )
-    except BaseException:
-        os.close(descriptor)
+    except BaseException as validation_exc:
+        try:
+            os.close(descriptor)
+        except BaseException as close_exc:
+            validation_exc.add_note(
+                f"GC release-root descriptor close also failed: {close_exc}"
+            )
         raise
 
 
@@ -1568,7 +1573,11 @@ def _fsync_gc_root(
     capability: _GcRootCapability, *, allow_moved: bool = False
 ) -> None:
     os.fsync(capability.descriptor)
-    _gc_root_path(capability, allow_moved=allow_moved)
+    try:
+        _gc_root_path(capability, allow_moved=allow_moved)
+    except BaseException as validation_exc:
+        setattr(validation_exc, "gc_root_fsync_completed", True)
+        raise
 
 
 def _restore_retired_release(
@@ -1576,7 +1585,7 @@ def _restore_retired_release(
     retirement_name: str,
     release_name: str,
     identity: tuple[int, int],
-) -> None:
+) -> Path:
     try:
         successor = os.stat(
             release_name, dir_fd=capability.descriptor, follow_symlinks=False
@@ -1594,8 +1603,63 @@ def _restore_retired_release(
     )
     if (observed.st_dev, observed.st_ino) != identity:
         raise RuntimeError("retired release identity changed before restoration")
+    active_root = _gc_root_path(capability, allow_moved=True)
+    restored_path = active_root / release_name
+    retirement_path = active_root / retirement_name
     _rename_exclusive_at(capability.descriptor, retirement_name, release_name)
-    _fsync_gc_root(capability, allow_moved=True)
+    restoration_fsync_completed = False
+    try:
+        _fsync_gc_root(capability, allow_moved=True)
+        restoration_fsync_completed = True
+        restored_path = _gc_root_path(capability, allow_moved=True) / release_name
+    except BaseException as exc:
+        if restoration_fsync_completed:
+            setattr(exc, "gc_root_fsync_completed", True)
+        try:
+            active_root = _gc_root_path(capability, allow_moved=True)
+            restored_path = active_root / release_name
+            retirement_path = active_root / retirement_name
+        except BaseException as path_exc:
+            exc.add_note(
+                f"restored release path resolution also failed: {path_exc}"
+            )
+        setattr(exc, "gc_restored_path", restored_path)
+        if not getattr(exc, "gc_root_fsync_completed", False):
+            setattr(exc, "gc_retirement_path", retirement_path)
+        raise
+    return restored_path
+
+
+def _retain_gc_restoration_durability_failure(
+    restore_exc: BaseException,
+    retained: list[dict[str, str]],
+) -> bool:
+    found = False
+    for attribute, reason in (
+        ("gc_retirement_path", "indeterminate-retirement-after-restoration-durability-failure"),
+        (
+            "gc_restored_path",
+            (
+                "restored-canonical-post-fsync-validation-failed"
+                if getattr(restore_exc, "gc_root_fsync_completed", False)
+                else "restored-canonical-durability-failed"
+            ),
+        ),
+    ):
+        artifact = getattr(restore_exc, attribute, None)
+        if artifact is None:
+            continue
+        found = True
+        artifact_path = str(artifact)
+        if any(item["path"] == artifact_path for item in retained):
+            continue
+        retained.append(
+            {
+                "path": artifact_path,
+                "reason": f"{reason}: {restore_exc}",
+            }
+        )
+    return found
 
 
 def _gc_retirement_record_payload(
@@ -1617,7 +1681,10 @@ def _gc_retirement_record_payload(
 
 
 def _read_gc_retirement_record(
-    root: Path, record: Path
+    root: Path,
+    record: Path,
+    *,
+    authority_root: Path | None = None,
 ) -> tuple[Path, Path, tuple[int, int]]:
     info = os.lstat(record)
     if (
@@ -1646,18 +1713,23 @@ def _read_gc_retirement_record(
         raise RuntimeError("GC retirement record schema is invalid")
     release = root / f"release-{match.group(2)}"
     retirement = root / match.group(1)
+    authority = root if authority_root is None else authority_root
+    authority_release = authority / release.name
+    authority_retirement = authority / retirement.name
     identity_value = payload.get("identity")
     if (
         payload.get("version") != 1
-        or payload.get("canonical") != str(release)
-        or payload.get("retirement") != str(retirement)
+        or payload.get("canonical") != str(authority_release)
+        or payload.get("retirement") != str(authority_retirement)
         or not isinstance(identity_value, list)
         or len(identity_value) != 2
         or any(not isinstance(value, int) for value in identity_value)
     ):
         raise RuntimeError("GC retirement record identity is invalid")
     identity = (identity_value[0], identity_value[1])
-    if data != _gc_retirement_record_payload(release, retirement, identity):
+    if data != _gc_retirement_record_payload(
+        authority_release, authority_retirement, identity
+    ):
         raise RuntimeError("GC retirement record is not canonical")
     return release, retirement, identity
 
@@ -1689,14 +1761,41 @@ def _write_private_candidate_at(
             or stat.S_IMODE(observed.st_mode) != mode
         ):
             raise RuntimeError("GC retirement record metadata changed during publication")
-    except BaseException:
-        os.close(descriptor)
+    except BaseException as publication_exc:
+        try:
+            os.close(descriptor)
+        except BaseException as close_exc:
+            publication_exc.add_note(
+                f"GC retirement record descriptor close also failed: {close_exc}"
+            )
         descriptor = -1
         if created:
+            record_removed = False
             try:
                 os.unlink(name, dir_fd=capability.descriptor)
+                record_removed = True
             except FileNotFoundError:
-                pass
+                record_removed = True
+            except BaseException as unlink_exc:
+                publication_exc.add_note(
+                    f"GC retirement record unlink also failed: {unlink_exc}"
+                )
+            if record_removed:
+                try:
+                    _fsync_gc_root(capability, allow_moved=True)
+                except BaseException as durability_exc:
+                    publication_exc.add_note(
+                        "GC retirement record cleanup durability also failed: "
+                        f"{durability_exc}"
+                    )
+                    if not getattr(
+                        durability_exc, "gc_root_fsync_completed", False
+                    ):
+                        setattr(
+                            publication_exc,
+                            "gc_indeterminate_record_cleanup",
+                            durability_exc,
+                        )
         raise
     finally:
         if descriptor >= 0:
@@ -1707,7 +1806,443 @@ def _remove_gc_retirement_record(
     capability: _GcRootCapability, record_name: str, *, allow_moved: bool = False
 ) -> None:
     os.unlink(record_name, dir_fd=capability.descriptor)
-    _fsync_gc_root(capability, allow_moved=allow_moved)
+    try:
+        _fsync_gc_root(capability, allow_moved=allow_moved)
+    except BaseException as durability_exc:
+        if not getattr(durability_exc, "gc_root_fsync_completed", False):
+            setattr(
+                durability_exc,
+                "gc_indeterminate_record_cleanup",
+                durability_exc,
+            )
+        raise
+
+
+def _propagate_gc_indeterminate_record_cleanup(
+    primary: BaseException, cleanup_exc: BaseException
+) -> None:
+    cleanup_durability = getattr(
+        cleanup_exc,
+        "gc_indeterminate_record_cleanup",
+        None,
+    )
+    if cleanup_durability is not None:
+        setattr(
+            primary,
+            "gc_indeterminate_record_cleanup",
+            cleanup_durability,
+        )
+
+
+def _gc_retained_artifact_path(
+    capability: _GcRootCapability,
+    name: str,
+    fallback: Path,
+    primary: BaseException,
+) -> Path:
+    try:
+        return _gc_root_path(capability, allow_moved=True) / name
+    except BaseException as path_exc:
+        primary.add_note(f"GC retained artifact path lookup also failed: {path_exc}")
+        return fallback
+
+
+def _retain_gc_record_if_present(
+    capability: _GcRootCapability,
+    record_name: str,
+    fallback: Path,
+    retained: list[dict[str, str]],
+    reason: str,
+    primary: BaseException,
+) -> None:
+    cleanup_durability = getattr(
+        primary,
+        "gc_indeterminate_record_cleanup",
+        None,
+    )
+    if cleanup_durability is not None:
+        retained_path = str(
+            _gc_retained_artifact_path(
+                capability, record_name, fallback, primary
+            )
+        )
+        if not any(item["path"] == retained_path for item in retained):
+            retained.append(
+                {
+                    "path": retained_path,
+                    "reason": (
+                        "indeterminate-record-cleanup-durability: "
+                        f"{cleanup_durability}"
+                    ),
+                }
+            )
+        return
+    try:
+        os.stat(
+            record_name,
+            dir_fd=capability.descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    except BaseException as probe_exc:
+        primary.add_note(f"GC retirement record state probe also failed: {probe_exc}")
+        reason = f"indeterminate-record-state: {probe_exc}"
+    retained_path = str(
+        _gc_retained_artifact_path(
+            capability, record_name, fallback, primary
+        )
+    )
+    if any(item["path"] == retained_path for item in retained):
+        return
+    retained.append({"path": retained_path, "reason": reason})
+
+
+def _retain_gc_resume_pre_deletion_failure(
+    capability: _GcRootCapability,
+    retirement_name: str,
+    record_name: str,
+    retirement_fallback: Path,
+    record_fallback: Path,
+    retained: list[dict[str, str]],
+    primary: BaseException,
+) -> None:
+    retirement_path = str(
+        _gc_retained_artifact_path(
+            capability, retirement_name, retirement_fallback, primary
+        )
+    )
+    if not any(item["path"] == retirement_path for item in retained):
+        retained.append(
+            {
+                "path": retirement_path,
+                "reason": f"resume-pre-deletion-failed: {primary}",
+            }
+        )
+    _retain_gc_record_if_present(
+        capability,
+        record_name,
+        record_fallback,
+        retained,
+        f"record-retained-after-resume-pre-deletion-failure: {primary}",
+        primary,
+    )
+
+
+def _retain_gc_recovery_probe_failure(
+    capability: _GcRootCapability,
+    release_name: str,
+    retirement_name: str,
+    record_name: str,
+    release_fallback: Path,
+    retirement_fallback: Path,
+    record_fallback: Path,
+    retained: list[dict[str, str]],
+    primary: BaseException,
+    *,
+    canonical_known: bool | None,
+) -> None:
+    artifacts: list[tuple[str, Path, str]] = []
+    if canonical_known is True:
+        artifacts.append(
+            (
+                release_name,
+                release_fallback,
+                f"canonical-retained-after-recovery-probe-failure: {primary}",
+            )
+        )
+    elif canonical_known is None:
+        artifacts.append(
+            (
+                release_name,
+                release_fallback,
+                (
+                    "indeterminate-canonical-state-after-recovery-probe-failure: "
+                    f"{primary}"
+                ),
+            )
+        )
+    artifacts.extend(
+        (
+            (
+                retirement_name,
+                retirement_fallback,
+                (
+                    "indeterminate-retirement-state-after-recovery-probe-failure: "
+                    f"{primary}"
+                ),
+            ),
+            (
+                record_name,
+                record_fallback,
+                f"record-retained-after-recovery-probe-failure: {primary}",
+            ),
+        )
+    )
+    for name, fallback, reason in artifacts:
+        artifact_path = str(
+            _gc_retained_artifact_path(
+                capability, name, fallback, primary
+            )
+        )
+        if any(item["path"] == artifact_path for item in retained):
+            continue
+        retained.append({"path": artifact_path, "reason": reason})
+
+
+def _retain_gc_restoration_failure_artifact(
+    capability: _GcRootCapability,
+    release_name: str,
+    retirement_name: str,
+    release_fallback: Path,
+    retirement_fallback: Path,
+    retained: list[dict[str, str]],
+    reason: str,
+    primary: BaseException,
+) -> None:
+    retirement_found = False
+    for name, fallback in (
+        (retirement_name, retirement_fallback),
+        (release_name, release_fallback),
+    ):
+        try:
+            os.stat(
+                name,
+                dir_fd=capability.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        except BaseException as probe_exc:
+            primary.add_note(
+                f"GC restoration outcome probe also failed for {name}: {probe_exc}"
+            )
+            retained_path = str(
+                _gc_retained_artifact_path(
+                    capability, name, fallback, primary
+                )
+            )
+            if not any(item["path"] == retained_path for item in retained):
+                retained.append(
+                    {
+                        "path": retained_path,
+                        "reason": f"indeterminate-restoration-state: {probe_exc}",
+                    }
+                )
+            continue
+        artifact_reason = reason
+        if name == retirement_name:
+            retirement_found = True
+        elif retirement_found:
+            artifact_reason = "foreign-canonical-successor"
+        retained_path = str(
+            _gc_retained_artifact_path(
+                capability, name, fallback, primary
+            )
+        )
+        if any(item["path"] == retained_path for item in retained):
+            continue
+        retained.append(
+            {
+                "path": retained_path,
+                "reason": artifact_reason,
+            }
+        )
+
+
+def _finish_gc_deletion(
+    capability: _GcRootCapability,
+    record_name: str,
+    record_path: Path,
+    retained: list[dict[str, str]],
+    *,
+    retirement_name: str,
+    retirement_path: Path,
+    completion_context: str = "deletion",
+) -> None:
+    try:
+        _fsync_gc_root(capability)
+    except BaseException as durability_exc:
+        if not getattr(durability_exc, "gc_root_fsync_completed", False):
+            retained_path = str(
+                _gc_retained_artifact_path(
+                    capability,
+                    retirement_name,
+                    retirement_path,
+                    durability_exc,
+                )
+            )
+            if not any(item["path"] == retained_path for item in retained):
+                retained.append(
+                    {
+                        "path": retained_path,
+                        "reason": (
+                            f"indeterminate-retirement-after-{completion_context}-"
+                            f"durability-failure: {durability_exc}"
+                        ),
+                    }
+                )
+        record_failure_context = (
+            f"{completion_context}-post-fsync-validation-failure"
+            if getattr(durability_exc, "gc_root_fsync_completed", False)
+            else f"{completion_context}-durability-failure"
+        )
+        _retain_gc_record_if_present(
+            capability,
+            record_name,
+            record_path,
+            retained,
+            f"record-retained-after-{record_failure_context}: {durability_exc}",
+            durability_exc,
+        )
+        raise
+    try:
+        _remove_gc_retirement_record(capability, record_name)
+    except BaseException as cleanup_exc:
+        _retain_gc_record_if_present(
+            capability,
+            record_name,
+            record_path,
+            retained,
+            f"record-cleanup-failed-after-{completion_context}: {cleanup_exc}",
+            cleanup_exc,
+        )
+        raise
+
+
+def _delete_gc_retirement(
+    capability: _GcRootCapability,
+    retirement_name: str,
+    record_name: str,
+    canonical_path: Path,
+    retirement_path: Path,
+    record_path: Path,
+    deleted: list[str],
+    retained: list[dict[str, str]],
+) -> None:
+    try:
+        shutil.rmtree(retirement_name, dir_fd=capability.descriptor)
+    except BaseException as deletion_exc:
+        try:
+            os.stat(
+                retirement_name,
+                dir_fd=capability.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            deleted.append(
+                str(
+                    _gc_retained_artifact_path(
+                        capability,
+                        canonical_path.name,
+                        canonical_path,
+                        deletion_exc,
+                    )
+                )
+            )
+            retained.append(
+                {
+                    "path": str(
+                        _gc_retained_artifact_path(
+                            capability,
+                            retirement_name,
+                            retirement_path,
+                            deletion_exc,
+                        )
+                    ),
+                    "reason": (
+                        "indeterminate-retirement-after-deletion-exception: "
+                        f"{deletion_exc}"
+                    ),
+                }
+            )
+            _retain_gc_record_if_present(
+                capability,
+                record_name,
+                record_path,
+                retained,
+                f"record-retained-after-deletion-exception: {deletion_exc}",
+                deletion_exc,
+            )
+        except BaseException as probe_exc:
+            deletion_exc.add_note(
+                f"GC deletion outcome probe also failed: {probe_exc}"
+            )
+            retained.append(
+                {
+                    "path": str(
+                        _gc_retained_artifact_path(
+                            capability,
+                            retirement_name,
+                            retirement_path,
+                            deletion_exc,
+                        )
+                    ),
+                    "reason": (
+                        "indeterminate-retirement-state-after-deletion-probe-failure: "
+                        f"{probe_exc}"
+                    ),
+                }
+            )
+            retained.append(
+                {
+                    "path": str(
+                        _gc_retained_artifact_path(
+                            capability, record_name, record_path, deletion_exc
+                        )
+                    ),
+                    "reason": f"indeterminate-deletion-state: {probe_exc}",
+                }
+            )
+        else:
+            retained.append(
+                {
+                    "path": str(
+                        _gc_retained_artifact_path(
+                            capability,
+                            retirement_name,
+                            retirement_path,
+                            deletion_exc,
+                        )
+                    ),
+                    "reason": f"deletion-failed: {deletion_exc}",
+                }
+            )
+            _retain_gc_record_if_present(
+                capability,
+                record_name,
+                record_path,
+                retained,
+                f"record-retained-after-deletion-failure: {deletion_exc}",
+                deletion_exc,
+            )
+        raise
+    try:
+        deleted_path = (
+            _gc_root_path(capability, allow_moved=True)
+            / canonical_path.name
+        )
+    except BaseException as path_exc:
+        deleted.append(str(canonical_path))
+        path_exc.add_note(
+            "GC completed deletion path lookup failed; using the last-verified "
+            f"canonical path {canonical_path}"
+        )
+        try:
+            _finish_gc_deletion(
+                capability,
+                record_name,
+                record_path,
+                retained,
+                retirement_name=retirement_name,
+                retirement_path=retirement_path,
+            )
+        except BaseException as finalization_exc:
+            path_exc.add_note(
+                f"GC deletion finalization also failed: {finalization_exc}"
+            )
+        raise
+    deleted.append(str(deleted_path))
 
 
 def _resume_gc_retirements(
@@ -1716,40 +2251,182 @@ def _resume_gc_retirements(
     agent_repo: Path,
     runtime_reference_supplier,
     lock_verifier,
+    deleted: list[str] | None = None,
+    retained: list[dict[str, str]] | None = None,
+    recovery_protected_names: set[str] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     root = _gc_root_path(capability)
-    deleted: list[str] = []
-    retained: list[dict[str, str]] = []
+    if deleted is None:
+        deleted = []
+    if retained is None:
+        retained = []
     records = sorted(root.glob(".gc-retired-*.record"), key=lambda path: path.name)
     for opening_record in records:
         root = _gc_root_path(capability)
         record = root / opening_record.name
         try:
             release, retirement, identity = _read_gc_retirement_record(root, record)
-        except (OSError, RuntimeError, ValueError) as exc:
-            retained.append({"path": str(record), "reason": f"unverified-record: {exc}"})
-            continue
+        except (OSError, RuntimeError, ValueError) as opening_exc:
+            current_root = _gc_root_path(capability, allow_moved=True)
+            current_record = current_root / opening_record.name
+            if current_root == root:
+                retained.append(
+                    {
+                        "path": str(current_record),
+                        "reason": f"unverified-record: {opening_exc}",
+                    }
+                )
+                continue
+            try:
+                release, retirement, identity = _read_gc_retirement_record(
+                    current_root,
+                    current_record,
+                    authority_root=capability.original_path,
+                )
+            except (OSError, RuntimeError, ValueError) as retry_exc:
+                opening_exc.add_note(
+                    f"GC retirement record retry after root movement also failed: {retry_exc}"
+                )
+                retained.append(
+                    {
+                        "path": str(current_record),
+                        "reason": f"unverified-record: {retry_exc}",
+                    }
+                )
+                continue
+            root = current_root
+            record = current_record
+        current_root = _gc_root_path(capability, allow_moved=True)
+        release = current_root / release.name
+        retirement = current_root / retirement.name
+        record = current_root / record.name
+        try:
+            _gc_root_path(capability)
+        except BaseException as movement_exc:
+            _retain_gc_resume_pre_deletion_failure(
+                capability,
+                retirement.name,
+                record.name,
+                retirement,
+                record,
+                retained,
+                movement_exc,
+            )
+            raise
+        if recovery_protected_names is not None:
+            recovery_protected_names.add(release.name)
         try:
             canonical = os.stat(
                 release.name, dir_fd=capability.descriptor, follow_symlinks=False
             )
         except FileNotFoundError:
             canonical = None
+        except BaseException as probe_exc:
+            _retain_gc_recovery_probe_failure(
+                capability,
+                release.name,
+                retirement.name,
+                record.name,
+                release,
+                retirement,
+                record,
+                retained,
+                probe_exc,
+                canonical_known=None,
+            )
+            raise
         try:
             retired = os.stat(
                 retirement.name, dir_fd=capability.descriptor, follow_symlinks=False
             )
         except FileNotFoundError:
             retired = None
+        except BaseException as probe_exc:
+            _retain_gc_recovery_probe_failure(
+                capability,
+                release.name,
+                retirement.name,
+                record.name,
+                release,
+                retirement,
+                record,
+                retained,
+                probe_exc,
+                canonical_known=canonical is not None,
+            )
+            raise
         if canonical is not None:
             if retired is None and (canonical.st_dev, canonical.st_ino) == identity:
-                _remove_gc_retirement_record(capability, record.name)
+                try:
+                    _finish_gc_deletion(
+                        capability,
+                        record.name,
+                        record,
+                        retained,
+                        retirement_name=retirement.name,
+                        retirement_path=retirement,
+                        completion_context="restored-canonical-recovery",
+                    )
+                    restored_path = _gc_root_path(capability) / release.name
+                except BaseException as finalization_exc:
+                    restored_path = _gc_retained_artifact_path(
+                        capability,
+                        release.name,
+                        release,
+                        finalization_exc,
+                    )
+                    retained.append(
+                        {
+                            "path": str(restored_path),
+                            "reason": "restored-canonical-after-crash",
+                        }
+                    )
+                    raise
+                retained.append(
+                    {
+                        "path": str(restored_path),
+                        "reason": "restored-canonical-after-crash",
+                    }
+                )
                 continue
-            retained.append({"path": str(retirement), "reason": "foreign-canonical-successor"})
+            root = _gc_root_path(capability, allow_moved=True)
+            retained.append(
+                {
+                    "path": str(root / release.name),
+                    "reason": "foreign-canonical-successor",
+                }
+            )
+            if retired is not None:
+                retained.append(
+                    {
+                        "path": str(root / retirement.name),
+                        "reason": (
+                            "retirement-retained-with-foreign-canonical-successor"
+                        ),
+                    }
+                )
+            retained.append(
+                {
+                    "path": str(root / record.name),
+                    "reason": "record-retained-with-foreign-canonical-successor",
+                }
+            )
             continue
         if retired is None:
-            _remove_gc_retirement_record(capability, record.name)
-            deleted.append(str(release))
+            deleted.append(
+                str(
+                    _gc_root_path(capability, allow_moved=True)
+                    / release.name
+                )
+            )
+            _finish_gc_deletion(
+                capability,
+                record.name,
+                record,
+                retained,
+                retirement_name=retirement.name,
+                retirement_path=retirement,
+            )
             continue
         if (
             not stat.S_ISDIR(retired.st_mode)
@@ -1758,34 +2435,112 @@ def _resume_gc_retirements(
             or (retired.st_dev, retired.st_ino) != identity
         ):
             retained.append({"path": str(retirement), "reason": "retirement-identity-changed"})
-            continue
-        try:
-            _verify_gc_release(agent_repo, retirement, canonical_name=release.name)
-        except (OSError, RuntimeError, ValueError) as exc:
             retained.append(
                 {
-                    "path": str(retirement),
-                    "reason": f"unverified-partial-retirement: {exc}",
+                    "path": str(record),
+                    "reason": "record-retained-with-retirement-identity-change",
                 }
             )
             continue
-        observed = os.stat(
-            retirement.name, dir_fd=capability.descriptor, follow_symlinks=False
-        )
-        if (observed.st_dev, observed.st_ino) != identity:
-            retained.append({"path": str(retirement), "reason": "retirement-identity-changed"})
+        try:
+            _verify_gc_release(agent_repo, retirement, canonical_name=release.name)
+        except (OSError, RuntimeError, ValueError) as verification_exc:
+            current_root = _gc_root_path(capability, allow_moved=True)
+            current_retirement = current_root / retirement.name
+            current_record = current_root / record.name
+            if current_retirement != retirement:
+                try:
+                    _gc_root_path(capability)
+                except BaseException as movement_exc:
+                    _retain_gc_resume_pre_deletion_failure(
+                        capability,
+                        retirement.name,
+                        record.name,
+                        current_retirement,
+                        current_record,
+                        retained,
+                        movement_exc,
+                    )
+                    raise
+            retained.append(
+                {
+                    "path": str(current_retirement),
+                    "reason": (
+                        "unverified-partial-retirement: "
+                        f"{verification_exc}"
+                    ),
+                }
+            )
+            retained.append(
+                {
+                    "path": str(current_record),
+                    "reason": "record-retained-with-unverified-partial-retirement",
+                }
+            )
             continue
-        references = _gc_reference_map(
-            _gc_root_path(capability), set(runtime_reference_supplier())
+        try:
+            observed = os.stat(
+                retirement.name,
+                dir_fd=capability.descriptor,
+                follow_symlinks=False,
+            )
+            if (observed.st_dev, observed.st_ino) != identity:
+                retained.append(
+                    {"path": str(retirement), "reason": "retirement-identity-changed"}
+                )
+                retained.append(
+                    {
+                        "path": str(record),
+                        "reason": "record-retained-with-retirement-identity-change",
+                    }
+                )
+                continue
+            runtime_references = set(runtime_reference_supplier())
+            references = _gc_reference_map(
+                _gc_root_path(capability), runtime_references
+            )
+            if release in references:
+                retained.append(
+                    {"path": str(retirement), "reason": "referenced-partial-retirement"}
+                )
+                retained.append(
+                    {
+                        "path": str(record),
+                        "reason": "record-retained-with-referenced-partial-retirement",
+                    }
+                )
+                continue
+            lock_verifier()
+            _gc_root_path(capability)
+        except BaseException as resume_exc:
+            _retain_gc_resume_pre_deletion_failure(
+                capability,
+                retirement.name,
+                record.name,
+                retirement,
+                record,
+                retained,
+                resume_exc,
+            )
+            raise
+        _delete_gc_retirement(
+            capability,
+            retirement.name,
+            record.name,
+            release,
+            retirement,
+            record,
+            deleted,
+            retained,
         )
-        if release in references:
-            retained.append({"path": str(retirement), "reason": "referenced-partial-retirement"})
-            continue
-        lock_verifier()
-        shutil.rmtree(retirement.name, dir_fd=capability.descriptor)
-        _fsync_gc_root(capability)
-        _remove_gc_retirement_record(capability, record.name)
-        deleted.append(str(release))
+        _finish_gc_deletion(
+            capability,
+            record.name,
+            record,
+            retained,
+            retirement_name=retirement.name,
+            retirement_path=retirement,
+        )
     return deleted, retained
 
 
@@ -1802,19 +2557,28 @@ def apply_release_gc(
     agent_repo = Path(agent_repo)
     root = release_root(agent_repo)
     capability = _open_gc_root(root)
+    deleted: list[str] = []
+    retained: list[dict[str, str]] = []
+    operation_failure: BaseException | None = None
     try:
         initial_runtime = set(runtime_reference_supplier())
         plan = plan_release_gc(agent_repo, runtime_references=initial_runtime)
         _gc_root_path(capability)
-        deleted, retained = _resume_gc_retirements(
+        recovery_protected_names: set[str] = set()
+        _resume_gc_retirements(
             capability,
             agent_repo=agent_repo,
             runtime_reference_supplier=runtime_reference_supplier,
             lock_verifier=lock_verifier,
+            deleted=deleted,
+            retained=retained,
+            recovery_protected_names=recovery_protected_names,
         )
         for candidate in plan["candidates"]:
             opening_release = Path(candidate)
             release_name = opening_release.name
+            if release_name in recovery_protected_names:
+                continue
             lock_verifier()
             active_root = _gc_root_path(capability)
             release = active_root / release_name
@@ -1830,21 +2594,69 @@ def apply_release_gc(
             record_name = f"{retirement_name}.record"
             retirement = active_root / retirement_name
             record = active_root / record_name
-            _write_private_candidate_at(
-                capability,
-                record_name,
-                _gc_retirement_record_payload(release, retirement, identity),
-                0o600,
-            )
+            try:
+                _write_private_candidate_at(
+                    capability,
+                    record_name,
+                    _gc_retirement_record_payload(release, retirement, identity),
+                    0o600,
+                )
+            except BaseException as publication_exc:
+                cleanup_durability = getattr(
+                    publication_exc,
+                    "gc_indeterminate_record_cleanup",
+                    None,
+                )
+                if cleanup_durability is None:
+                    _retain_gc_record_if_present(
+                        capability,
+                        record_name,
+                        record,
+                        retained,
+                        f"record-publication-failed: {publication_exc}",
+                        publication_exc,
+                    )
+                else:
+                    retained.append(
+                        {
+                            "path": str(
+                                _gc_retained_artifact_path(
+                                    capability,
+                                    record_name,
+                                    record,
+                                    publication_exc,
+                                )
+                            ),
+                            "reason": (
+                                "indeterminate-record-cleanup-durability: "
+                                f"{cleanup_durability}"
+                            ),
+                        }
+                    )
+                raise
             try:
                 _fsync_gc_root(capability)
-            except BaseException:
+            except BaseException as publication_exc:
                 try:
                     _remove_gc_retirement_record(
                         capability, record_name, allow_moved=True
                     )
-                except BaseException:
-                    pass
+                except BaseException as cleanup_exc:
+                    publication_exc.add_note(
+                        "GC retirement record cleanup also failed: "
+                        f"{cleanup_exc}"
+                    )
+                    _propagate_gc_indeterminate_record_cleanup(
+                        publication_exc, cleanup_exc
+                    )
+                    _retain_gc_record_if_present(
+                        capability,
+                        record_name,
+                        record,
+                        retained,
+                        f"record-cleanup-failed-after-publication: {cleanup_exc}",
+                        publication_exc,
+                    )
                 raise
             renamed = False
             try:
@@ -1854,36 +2666,138 @@ def apply_release_gc(
                 )
                 renamed = True
                 _fsync_gc_root(capability)
-            except BaseException:
+            except BaseException as retirement_exc:
                 if renamed:
                     try:
-                        _restore_retired_release(
+                        restored_path = _restore_retired_release(
                             capability, retirement_name, release_name, identity
                         )
-                        _remove_gc_retirement_record(
-                            capability, record_name, allow_moved=True
+                    except BaseException as restore_exc:
+                        retirement_exc.add_note(
+                            f"GC restoration also failed: {restore_exc}"
                         )
-                    except BaseException:
-                        pass
+                        restored_path = getattr(restore_exc, "gc_restored_path", None)
+                        if not _retain_gc_restoration_durability_failure(
+                            restore_exc, retained
+                        ):
+                            _retain_gc_restoration_failure_artifact(
+                                capability,
+                                release_name,
+                                retirement_name,
+                                release,
+                                retirement,
+                                retained,
+                                f"restoration-failed: {restore_exc}",
+                                retirement_exc,
+                            )
+                        _retain_gc_record_if_present(
+                            capability,
+                            record_name,
+                            record,
+                            retained,
+                            f"record-retained-after-restoration-failure: {restore_exc}",
+                            retirement_exc,
+                        )
+                    else:
+                        retained_item = {
+                            "path": str(restored_path),
+                            "reason": "restored-after-retirement-failure",
+                        }
+                        retained.append(retained_item)
+                        try:
+                            _remove_gc_retirement_record(
+                                capability, record_name, allow_moved=True
+                            )
+                        except BaseException as cleanup_exc:
+                            retained_item["reason"] = (
+                                "restored-canonical-record-cleanup-failed: "
+                                f"{cleanup_exc}"
+                            )
+                            retirement_exc.add_note(
+                                f"GC retirement record cleanup also failed: {cleanup_exc}"
+                            )
+                            _propagate_gc_indeterminate_record_cleanup(
+                                retirement_exc, cleanup_exc
+                            )
+                            _retain_gc_record_if_present(
+                                capability,
+                                record_name,
+                                record,
+                                retained,
+                                f"record-cleanup-failed-after-restoration: {cleanup_exc}",
+                                retirement_exc,
+                            )
                 else:
-                    _remove_gc_retirement_record(capability, record_name)
+                    try:
+                        _remove_gc_retirement_record(capability, record_name)
+                    except BaseException as cleanup_exc:
+                        retirement_exc.add_note(
+                            f"GC retirement record cleanup also failed: {cleanup_exc}"
+                        )
+                        _propagate_gc_indeterminate_record_cleanup(
+                            retirement_exc, cleanup_exc
+                        )
+                        _retain_gc_record_if_present(
+                            capability,
+                            record_name,
+                            record,
+                            retained,
+                            f"record-cleanup-failed-before-retirement: {cleanup_exc}",
+                            retirement_exc,
+                        )
                 raise
             deletion_started = False
             try:
                 active_root = _gc_root_path(capability)
                 release = active_root / release_name
                 retirement = active_root / retirement_name
-                references = _gc_reference_map(
-                    active_root, set(runtime_reference_supplier())
-                )
+                runtime_references = set(runtime_reference_supplier())
+                active_root = _gc_root_path(capability)
+                references = _gc_reference_map(active_root, runtime_references)
                 if release in references:
-                    _restore_retired_release(
-                        capability, retirement_name, release_name, identity
-                    )
-                    _remove_gc_retirement_record(capability, record_name)
+                    try:
+                        restored_path = _restore_retired_release(
+                            capability, retirement_name, release_name, identity
+                        )
+                    except BaseException as restore_exc:
+                        restored_path = getattr(restore_exc, "gc_restored_path", None)
+                        if not _retain_gc_restoration_durability_failure(
+                            restore_exc, retained
+                        ):
+                            _retain_gc_restoration_failure_artifact(
+                                capability,
+                                release_name,
+                                retirement_name,
+                                release,
+                                retirement,
+                                retained,
+                                f"restoration-failed: {restore_exc}",
+                                restore_exc,
+                            )
+                        _retain_gc_record_if_present(
+                            capability,
+                            record_name,
+                            record,
+                            retained,
+                            f"record-retained-after-restoration-failure: {restore_exc}",
+                            restore_exc,
+                        )
+                        raise
                     retained.append(
-                        {"path": str(opening_release), "reason": "referenced-after-retirement"}
+                        {"path": str(restored_path), "reason": "referenced-after-retirement"}
                     )
+                    try:
+                        _remove_gc_retirement_record(capability, record_name)
+                    except BaseException as cleanup_exc:
+                        _retain_gc_record_if_present(
+                            capability,
+                            record_name,
+                            record,
+                            retained,
+                            f"record-cleanup-failed-after-restoration: {cleanup_exc}",
+                            cleanup_exc,
+                        )
+                        raise
                     continue
                 try:
                     os.stat(
@@ -1915,12 +2829,29 @@ def apply_release_gc(
                 if (observed.st_dev, observed.st_ino) != identity:
                     raise RuntimeError("retired release identity changed before deletion")
                 lock_verifier()
+                _gc_root_path(capability)
                 deletion_started = True
-                shutil.rmtree(retirement_name, dir_fd=capability.descriptor)
-                _fsync_gc_root(capability)
-                _remove_gc_retirement_record(capability, record_name)
-                deleted.append(str(opening_release))
-            except BaseException:
+                _delete_gc_retirement(
+                    capability,
+                    retirement_name,
+                    record_name,
+                    opening_release,
+                    retirement,
+                    record,
+                    deleted,
+                    retained,
+                )
+                _finish_gc_deletion(
+                    capability,
+                    record_name,
+                    record,
+                    retained,
+                    retirement_name=retirement_name,
+                    retirement_path=retirement,
+                )
+            except BaseException as deletion_exc:
+                if deletion_started:
+                    raise
                 try:
                     retired = os.stat(
                         retirement_name,
@@ -1929,20 +2860,126 @@ def apply_release_gc(
                     )
                 except FileNotFoundError:
                     retired = None
+                    _retain_gc_record_if_present(
+                        capability,
+                        record_name,
+                        record,
+                        retained,
+                        "record-retained-after-compensation",
+                        deletion_exc,
+                    )
+                except BaseException as probe_exc:
+                    deletion_exc.add_note(
+                        f"GC compensation state probe also failed: {probe_exc}"
+                    )
+                    retired = None
+                    retained.append(
+                        {
+                            "path": str(
+                                _gc_retained_artifact_path(
+                                    capability,
+                                    retirement_name,
+                                    retirement,
+                                    deletion_exc,
+                                )
+                            ),
+                            "reason": (
+                                "indeterminate-retirement-state-after-compensation-"
+                                f"probe-failure: {probe_exc}"
+                            ),
+                        }
+                    )
+                    retained.append(
+                        {
+                            "path": str(
+                                _gc_retained_artifact_path(
+                                    capability,
+                                    record_name,
+                                    record,
+                                    deletion_exc,
+                                )
+                            ),
+                            "reason": f"indeterminate-deletion-state: {probe_exc}",
+                        }
+                    )
                 if not deletion_started and retired is not None:
                     try:
-                        _restore_retired_release(
+                        restored_path = _restore_retired_release(
                             capability, retirement_name, release_name, identity
                         )
-                    except BaseException:
-                        pass
+                    except BaseException as restore_exc:
+                        deletion_exc.add_note(
+                            f"GC restoration also failed: {restore_exc}"
+                        )
+                        restored_path = getattr(restore_exc, "gc_restored_path", None)
+                        if not _retain_gc_restoration_durability_failure(
+                            restore_exc, retained
+                        ):
+                            _retain_gc_restoration_failure_artifact(
+                                capability,
+                                release_name,
+                                retirement_name,
+                                release,
+                                retirement,
+                                retained,
+                                f"restoration-failed: {restore_exc}",
+                                deletion_exc,
+                            )
+                    else:
+                        retained.append(
+                            {
+                                "path": str(restored_path),
+                                "reason": "restored-after-failure",
+                            }
+                        )
+                    _retain_gc_record_if_present(
+                        capability,
+                        record_name,
+                        record,
+                        retained,
+                        "record-retained-after-compensation",
+                        deletion_exc,
+                    )
                 raise
         return {
             "deleted": sorted(set(deleted)),
             "retained": sorted(retained, key=lambda item: (item["path"], item["reason"])),
         }
+    except BaseException as exc:
+        if deleted or retained:
+            setattr(
+                exc,
+                "gc_partial_result",
+                {
+                    "deleted": sorted(set(deleted)),
+                    "retained": sorted(
+                        retained, key=lambda item: (item["path"], item["reason"])
+                    ),
+                },
+            )
+        operation_failure = exc
+        raise
     finally:
-        os.close(capability.descriptor)
+        try:
+            os.close(capability.descriptor)
+        except BaseException as close_exc:
+            if operation_failure is None:
+                if deleted or retained:
+                    setattr(
+                        close_exc,
+                        "gc_partial_result",
+                        {
+                            "deleted": sorted(set(deleted)),
+                            "retained": sorted(
+                                retained,
+                                key=lambda item: (item["path"], item["reason"]),
+                            ),
+                        },
+                    )
+                raise
+            operation_failure.add_note(
+                f"GC release-root capability close also failed: {close_exc}"
+            )
 
 
 def _owned_incomplete_fingerprint_paths(release: Path) -> set[str]:
@@ -2300,6 +3337,29 @@ def _add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     baseline.add_argument("--baseline-absent", action="store_true")
 
 
+def _emit_gc_partial_result(
+    result: dict[str, object], primary: BaseException
+) -> None:
+    try:
+        print(
+            json.dumps(
+                {
+                    **result,
+                    "error": {
+                        "message": str(primary),
+                        "type": type(primary).__name__,
+                    },
+                    "status": "partial",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+    except BaseException as output_exc:
+        primary.add_note(f"GC partial-result output also failed: {output_exc}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -2405,25 +3465,50 @@ def main() -> int:
             if observed != f"{token}\n":
                 raise RuntimeError("shared activation lock identity changed")
 
+        failure = None
         try:
-            result = apply_release_gc(
-                args.agent_repo,
-                runtime_reference_supplier=supplier,
-                lock_verifier=verify_lock,
-            )
+            try:
+                result = apply_release_gc(
+                    args.agent_repo,
+                    runtime_reference_supplier=supplier,
+                    lock_verifier=verify_lock,
+                )
+            except BaseException as exc:
+                failure = exc
+                partial = getattr(exc, "gc_partial_result", None)
+                if partial is not None:
+                    _emit_gc_partial_result(partial, exc)
+                raise
         finally:
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(state_helper),
-                    "lock-release",
-                    "lock",
-                    str(lock),
-                    token,
-                ],
-                check=True,
+            try:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(state_helper),
+                        "lock-release",
+                        "lock",
+                        str(lock),
+                        token,
+                    ],
+                    check=True,
+                )
+            except BaseException as release_exc:
+                if failure is None:
+                    if result["deleted"] or result["retained"]:
+                        _emit_gc_partial_result(result, release_exc)
+                    raise
+                failure.add_note(
+                    f"shared activation lock release also failed: {release_exc}"
+                )
+        try:
+            print(
+                json.dumps(result, sort_keys=True, separators=(",", ":")),
+                flush=True,
             )
-        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        except BaseException as output_exc:
+            if result["deleted"] or result["retained"]:
+                setattr(output_exc, "gc_partial_result", result)
+            raise
         return 0
     if args.action == "render-reference":
         root = release_root(args.agent_repo)
