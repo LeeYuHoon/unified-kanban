@@ -47,7 +47,13 @@ For a trusted maintainer workstation, `scripts/update-hermes-if-needed.sh` may b
 
 The selector is the applied state; there is no separate applied-SHA file to drift out of agreement with it.
 
-A previously published release directory is never deleted, because no unprivileged check can prove that no process is still executing through it. Superseded releases accumulate under `<HERMES_AGENT_REPO>.releases/` and are a maintainer's deliberate cleanup, not an automatic one. The only paths release construction removes are artifacts it created itself in the same operation and revalidated by inode identity first.
+### Guarded immutable-release garbage collection
+
+Release construction and update activation never delete a previously published release. A maintainer may instead run `python3 scripts/hermes-release-manager.py gc <HERMES_AGENT_REPO>` for a deterministic, write-free JSON plan. Planning validates the release-root ancestry and each candidate's private completion receipt and sealed contents; it preserves unrecognized, incomplete, malformed, tampered, or foreign entries rather than treating them as candidates.
+
+Deletion is a separate macOS-only action using the same command with `--apply`. Apply holds `$HERMES_HOME/state/hermes-kanban-update.lock`, retains descriptor and inode authority for the release root, and protects `current` and `previous` together with references found in the configured or loaded launchd service and stable same-UID runtime process and open-file probes. An unavailable, malformed, or non-convergent reference probe prevents deletion of the affected candidate and aborts subsequent work; candidates already deleted earlier in the same apply run are not restored.
+
+A candidate is first moved descriptor-relatively to a fresh private retirement name and bound to a durable retirement record. References and the shared lock are checked again before deletion; a newly referenced release is restored only when its canonical pathname is still absent and owned by that operation. On crash recovery, the record, retirement identity, complete receipt and contents, and fresh runtime references are revalidated before deletion resumes. A partial or tampered retirement is retained with its record and is neither deleted nor restored to the canonical pathname. Foreign successors, replacement roots, malformed records, and indeterminate recovery state are preserved for deliberate inspection.
 
 ## Dependency management
 

@@ -331,7 +331,7 @@ pgrep -f 'hermes dashboard' || true
 
 - release는 dependency sync보다 먼저 고정 경로에 게시된다. venv가 절대 경로를 기록하므로 나중에 옮길 수 없기 때문이다. 따라서 sync 실패나 중단은 completion receipt가 없는 release를 남길 수 있다.
 - 다음 실행은 그 release가 (1) 정확한 carried tip이고 (2) 구성 이후 venv와 receipt 후보 외에 아무것도 바뀌지 않았으며 (3) selector가 가리키지 않는다는 것을 모두 증명한 경우에만 private 이름으로 durable하게 retire한 뒤 재구성한다. 하나라도 증명되지 않으면 지우지 않고 실패한다.
-- retire 도중 중단되면 `<HERMES_AGENT_REPO>.releases/.retired-<random>`가 남는다. 이것은 선택될 수 없는 비활성 디렉터리이며, 다음 실행은 정상적으로 재구성한다. 내용을 확인한 뒤 수동으로 지워도 된다.
+- retire 도중 중단되면 `<HERMES_AGENT_REPO>.releases/.retired-<random>`가 남는다. 이것은 선택될 수 없는 비활성 디렉터리이며, 다음 실행은 정상적으로 재구성한다. 남은 retirement와 그 내용을 수동 삭제하지 않는다. 자동 recovery authority가 없으므로 그대로 보존하고, operation log 및 canonical namespace와 함께 maintainer가 별도로 조사한다.
 
 ### foreign launcher
 
