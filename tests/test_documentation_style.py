@@ -7,6 +7,8 @@ import re
 import subprocess
 import tokenize
 
+from kanban_adapter.compatibility import read_carried_commits
+
 
 REPO = Path(__file__).resolve().parents[1]
 HANGUL_RE = re.compile(r"[가-힣]")
@@ -88,14 +90,9 @@ def test_readme_hermes_release_matches_manifests() -> None:
     supported_upstream = (
         REPO / "patches/hermes-agent-supported-upstream"
     ).read_text(encoding="utf-8").strip()
-    carried_commits = [
-        line
-        for line in (REPO / "patches/hermes-agent-carried-commits").read_text(
-            encoding="utf-8"
-        ).splitlines()
-        if line and not line.startswith("#")
-    ]
-    carried_head = carried_commits[-1]
+    carried_head = read_carried_commits(
+        REPO / "patches/hermes-agent-carried-commits"
+    )[-1]
 
     assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
     assert f"Hermes Agent: `{version}`" in readme

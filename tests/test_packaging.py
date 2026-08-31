@@ -23,12 +23,16 @@ def test_sdist_contains_only_the_intended_library_contract(tmp_path: Path) -> No
     assert len(archives) == 1
     with tarfile.open(archives[0], "r:gz") as archive:
         names = set(archive.getnames())
+        root = next(name.split("/", 1)[0] for name in names)
+        version_file = archive.extractfile(f"{root}/patches/hermes-agent-version")
+        assert version_file is not None
+        archived_version = version_file.read()
 
-    root = next(name.split("/", 1)[0] for name in names)
     assert f"{root}/src/kanban_adapter/__init__.py" in names
     assert f"{root}/README.md" in names
     assert f"{root}/README.en.md" not in names
     assert f"{root}/LICENSE" in names
     assert f"{root}/THIRD_PARTY_NOTICES.md" in names
     assert f"{root}/patches/hermes-agent-version" in names
+    assert archived_version == (REPO / "patches/hermes-agent-version").read_bytes()
     assert not any(name.startswith(f"{root}/tests/") for name in names)
