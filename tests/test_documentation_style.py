@@ -81,6 +81,28 @@ def test_readme_is_short_and_written_for_new_users() -> None:
         assert difficult_term not in readme
 
 
+def test_readme_hermes_release_matches_manifests() -> None:
+    """README의 Hermes 버전과 commit이 배포 manifest와 같은지 확인한다."""
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    version = (REPO / "patches/hermes-agent-version").read_text(encoding="utf-8").strip()
+    supported_upstream = (
+        REPO / "patches/hermes-agent-supported-upstream"
+    ).read_text(encoding="utf-8").strip()
+    carried_commits = [
+        line
+        for line in (REPO / "patches/hermes-agent-carried-commits").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line and not line.startswith("#")
+    ]
+    carried_head = carried_commits[-1]
+
+    assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+    assert f"Hermes Agent: `{version}`" in readme
+    assert f"공식 기반 commit: `{supported_upstream}`" in readme
+    assert f"Unified Kanban release commit: `{carried_head}`" in readme
+
+
 def test_python_comments_and_docstrings_include_korean() -> None:
     failures: list[str] = []
     for path in tracked_files():

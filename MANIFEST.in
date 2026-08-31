@@ -1,1 +1,2 @@
+include patches/hermes-agent-version
 prune tests

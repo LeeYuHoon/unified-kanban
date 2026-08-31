@@ -28,6 +28,7 @@ hermes version
 - [ ] `hermes version`의 install directory가 현재 선택된 release(`<HERMES_AGENT_REPO>.releases/current`가 가리키는 경로)와 같은지 확인한다.
 - [ ] 현재 선택된 release, 검증된 carried head, carried commit 개수를 증거 템플릿에 기록한다.
 - [ ] release 시작 시 official provenance를 확인한 full 40-character SHA가 `patches/hermes-agent-supported-upstream`에 고정됐는지 확인한다. setup과 updater는 fixed official HTTPS 저장소에서 그 exact object를 가져와 identity를 검증하며, 이후 `main` 이동은 다음 maintenance cycle에서 처리한다.
+- [ ] `patches/hermes-agent-version`과 `README.md`의 Hermes 버전·공식 기반 commit·release commit을 새 carried bundle에 맞춘다. 문서 정책 테스트는 README와 manifest를 비교하고, production release 테스트는 version 파일을 bundle의 실제 `pyproject.toml`과 비교한다.
 - [ ] `--check` 결과가 `UP_TO_DATE`인지 `UPDATE_AVAILABLE`인지 기록한다.
 - [ ] Dashboard가 실행 중이었다면 PID와 `/api/status` 응답 여부를 기록한다.
 

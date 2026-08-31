@@ -4,6 +4,14 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 
 > 현재 macOS만 지원합니다.
 
+## 포함된 Hermes 버전
+
+- Hermes Agent: `0.20.6`
+- 공식 기반 commit: `10b388300a63d83857fac3ca4f8b05b64e01bc50`
+- Unified Kanban release commit: `edf5e1dbd80dc71cd69b483f92a9829c58685d6e`
+
+Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
+
 ## 무엇을 하는 프로젝트인가요?
 
 AI 도구에 일을 요청하면 진행 상황판에 카드가 생깁니다. 작업이 끝나면 결과와 사용량도 같은 카드에 기록됩니다.

@@ -32,6 +32,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -287,6 +288,35 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         helper.prepare_release(layout, uv=tmp_path / "absent-uv", **build)
     survivor.write_bytes(original)
     assert helper.prepare_release(layout, uv=tmp_path / "absent-uv", **build) == release
+
+
+def test_documented_hermes_version_matches_reviewed_release(
+    pinned_source: Path, tmp_path: Path
+) -> None:
+    """README에 기록한 버전이 실제 carried release와 같은지 확인한다."""
+    _, carried_head = reviewed_pins()
+    release = tmp_path / "documented-version.git"
+    subprocess.run(
+        ["git", "clone", "--bare", "--no-local", str(pinned_source), str(release)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(release), "bundle", "unbundle", str(BUNDLE)],
+        check=True,
+        capture_output=True,
+    )
+    project = subprocess.run(
+        ["git", "-C", str(release), "show", f"{carried_head}:pyproject.toml"],
+        check=True,
+        capture_output=True,
+    ).stdout
+    actual = tomllib.loads(project.decode("utf-8"))["project"]["version"]
+    documented = (REPO / "patches/hermes-agent-version").read_text(
+        encoding="utf-8"
+    ).strip()
+
+    assert documented == actual
 
 
 def test_reviewed_bundle_matches_its_recorded_integrity_metadata() -> None:

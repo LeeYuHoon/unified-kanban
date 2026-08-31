@@ -30,4 +30,5 @@ def test_sdist_contains_only_the_intended_library_contract(tmp_path: Path) -> No
     assert f"{root}/README.en.md" not in names
     assert f"{root}/LICENSE" in names
     assert f"{root}/THIRD_PARTY_NOTICES.md" in names
+    assert f"{root}/patches/hermes-agent-version" in names
     assert not any(name.startswith(f"{root}/tests/") for name in names)
