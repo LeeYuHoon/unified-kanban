@@ -332,7 +332,11 @@ unified-kanban/
    `${XDG_CACHE_HOME:-~/.cache}/unified-kanban/`에 저장하며 Git 추적 대상이 아니다.
 8. API 키·토큰·세션 토큰·개인 경로를 저장소에 기록하지 않는다. 필요한 값은 환경변수나
    로컬 전용 설정 파일에서 읽고 `.gitignore`로 차단한다.
-9. 설치 마지막에 `scripts/kanban-smoke.sh`를 실행하고 실패하면 비정상 종료한다.
+9. 기존의 non-bootstrap-managed 설치에서는 마지막에 `scripts/kanban-smoke.sh`를 실행하고
+   실패하면 비정상 종료한다. receipt-backed `bootstrap-managed` setup은 최초 설치와 이후 재실행
+   모두 자동 인증 smoke를 실행하지 않는다. provider credential과 smoke board의 존재를 bootstrap
+   receipt만으로 증명할 수 없으므로 매번 `authenticated smoke deferred`와 후속 수동 명령을 출력한다.
+   `--skip-smoke`는 기존-host smoke뿐 아니라 이 deferred 안내도 생략한다.
 10. `scripts/uninstall.sh`는 setup이 만든 링크와 자신이 추가한 설정 항목만 제거하며,
     Kanban DB와 사용자 카드는 삭제하지 않는다.
 
@@ -698,8 +702,14 @@ standalone `hermes-kanban` 저장소가 본 저장소로 흡수되었다. 관찰
   release 구성과 서비스 재시작을 모두 건너뛴다. 선택이 달라야 할 때만 불변 release를
   `<HERMES_AGENT_REPO>.releases/release-<carried>`에 구성하거나 정확히 재검증한 뒤 path
   transaction 안에서 selector 하나를 교체하고 원래 실행 중이던 서비스만 재시작한다. 실패
-  시 이전 selector를 복원하고 foreign successor는 보존한다. Hermes Agent 체크아웃이 없으면 호환성을
-  검증할 수 없으므로 setup은 Claude/Codex를 포함한 모든 설치 write 전에 중단한다. 이미
+  시 이전 selector를 복원하고 foreign successor는 보존한다. Hermes Agent 체크아웃이 없으면
+  기본적으로 호환성을 검증할 수 없으므로 setup은 Claude/Codex를 포함한 모든 설치 write 전에
+  중단한다. 유일한 예외는 checkout·Hermes data home·release root가 모두 안전하게 absent이고
+  `foreign Hermes` command가 없으며 dry-run이 아닌 `genuine empty supported macOS per-user host`다.
+  이 경우에만 reviewed manifest의 frozen official installer를 exact digest·argv·environment로 실행하고
+  authenticated receipt와 managed toolchain을 검증한 뒤 setup을 계속한다. `dry-run does not bootstrap`:
+  empty host dry-run, foreign/existing/dirty/newer/partial checkout, unsafe ancestry 또는 receipt authority
+  불일치는 모두 어떤 bootstrap/install write보다 먼저 fail closed한다. 이미
   로드된 Hermes plugin도 등록 시점과 각 새 turn 시작에서 pin과 selector가 가리키는
   release(=`release-<carried manifest 최종 commit>`), 그 release의 실행 파일과 자기 디렉터리
   identity에 묶인 completion receipt, `hermes version`이 보고한 upstream을 다시 검사하고, 설치된

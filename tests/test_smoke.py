@@ -125,3 +125,16 @@ def test_spec_documents_options_before_board_slug() -> None:
     assert 'boards create --name "Project B" --icon 🔧 project-b' in spec
     assert "boards create project-a --name" not in spec
     assert "boards create project-b --name" not in spec
+
+
+
+def test_spec_documents_bootstrap_managed_setup_exceptions() -> None:
+    spec = (REPO / "docs/unified-kanban-spec.md").read_text(encoding="utf-8")
+
+    smoke_contract = """receipt-backed `bootstrap-managed` setup은 최초 설치와 이후 재실행 모두 자동 인증 smoke를 실행하지 않는다. provider credential과 smoke board의 존재를 bootstrap receipt만으로 증명할 수 없으므로 매번 `authenticated smoke deferred`와 후속 수동 명령을 출력한다. `--skip-smoke`는 기존-host smoke뿐 아니라 이 deferred 안내도 생략한다."""
+    bootstrap_contract = """유일한 예외는 checkout·Hermes data home·release root가 모두 안전하게 absent이고 `foreign Hermes` command가 없으며 dry-run이 아닌 `genuine empty supported macOS per-user host`다."""
+    refusal_contract = """`dry-run does not bootstrap`: empty host dry-run, foreign/existing/dirty/newer/partial checkout, unsafe ancestry 또는 receipt authority 불일치는 모두 어떤 bootstrap/install write보다 먼저 fail closed한다."""
+
+    assert smoke_contract in " ".join(spec.split())
+    assert bootstrap_contract in " ".join(spec.split())
+    assert refusal_contract in " ".join(spec.split())
