@@ -165,6 +165,33 @@ def create_verified_bootstrap_artifacts(tmp_path: Path, agent_repo: Path) -> Non
     )
     launcher.chmod(0o755)
 
+def test_setup_scrubs_inherited_python_import_authority(tmp_path: Path) -> None:
+    env = environment(tmp_path)
+    injection = tmp_path / "hostile-python-imports"
+    injection.mkdir()
+    guarded_hermes = tmp_path / "guarded-hermes"
+    guarded_hermes.write_text(
+        FAKE_HERMES.replace(
+            "#!/usr/bin/env bash\n",
+            "#!/usr/bin/env bash\n"
+            "if [[ -n ${PYTHONPATH-} || -n ${PYTHONHOME-} ]]; then\n"
+            "  echo 'inherited Python import authority reached sealed Hermes' >&2\n"
+            "  exit 97\n"
+            "fi\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    guarded_hermes.chmod(0o755)
+    env["FAKE_HERMES_EXECUTABLE"] = str(guarded_hermes)
+    env["PYTHONPATH"] = str(injection)
+    env["PYTHONHOME"] = str(injection)
+
+    result = run(SETUP, env, "--skip-smoke")
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_setup_installs_and_enables_repo_plugin_idempotently(tmp_path: Path) -> None:
     env = environment(tmp_path)
 

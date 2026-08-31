@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 호출자가 주입한 Python import 경로가 검증된 도우미와 Hermes 릴리스를 오염시키지 못하게 한다.
+unset PYTHONPATH
+unset PYTHONHOME
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ORIGINAL_ARGS=("$@")
 DRY_RUN=0
