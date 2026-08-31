@@ -62,7 +62,7 @@ hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
 
 기존 Hermes 소스 폴더는 초기화하거나 수정하지 않습니다. 기존 설정, 로그인 정보, 상황판과 카드 데이터도 지우지 않습니다. 대신 이 프로젝트가 확인한 Hermes 복사본을 별도 폴더에 만들고, 앞으로 그 복사본을 사용하도록 연결합니다. Hermes 설정에는 Unified Kanban plugin을 쓰는 데 필요한 관리 항목만 추가합니다.
 
-먼저 컴퓨터를 바꾸지 않고 설치 가능 여부만 확인할 수 있습니다.
+먼저 실제 설치 없이 필요한 조건과 충돌 여부만 확인할 수 있습니다.
 
 ```bash
 ./scripts/setup.sh --dry-run --no-restart --skip-smoke
