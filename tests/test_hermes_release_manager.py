@@ -442,6 +442,70 @@ def test_build_source_release_uses_exact_refs_and_clean_private_checkout(
     assert not any(path.name.startswith(".building-") for path in layout.root.iterdir())
 
 
+def test_release_root_creation_fsyncs_containing_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    root = helper.release_root(checkout)
+    synced: list[Path] = []
+    monkeypatch.setattr(helper, "_fsync_directory", synced.append)
+
+    helper._ensure_private_root(root)
+    helper._ensure_private_root(root)
+
+    assert synced == [root.parent, root.parent]
+
+
+def test_release_root_creation_propagates_parent_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    root = helper.release_root(checkout)
+
+    def fail_fsync(_path: Path) -> None:
+        raise OSError("injected release-root parent fsync failure")
+
+    monkeypatch.setattr(helper, "_fsync_directory", fail_fsync)
+    with pytest.raises(OSError, match="injected release-root parent fsync failure"):
+        helper._ensure_private_root(root)
+    assert root.is_dir()
+
+
+def test_existing_unsafe_release_root_is_rejected_before_parent_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    root = helper.release_root(checkout)
+    root.mkdir(mode=0o700)
+    root.chmod(0o777)
+    synced: list[Path] = []
+    monkeypatch.setattr(helper, "_fsync_directory", synced.append)
+
+    with pytest.raises(RuntimeError, match="writable ancestor|mode 0700"):
+        helper._ensure_private_root(root)
+
+    assert synced == []
+
+
+def test_release_root_creation_rejects_writable_ancestor(tmp_path: Path) -> None:
+    helper = load_helper()
+    unsafe_parent = tmp_path / "unsafe-construction-parent"
+    unsafe_parent.mkdir(mode=0o700)
+    checkout = unsafe_parent / "hermes-agent"
+    checkout.mkdir()
+    root = helper.release_root(checkout)
+    unsafe_parent.chmod(0o777)
+
+    with pytest.raises(RuntimeError, match="untrusted writable ancestor"):
+        helper._ensure_private_root(root)
+
+
 def test_build_refuses_existing_release(tmp_path: Path) -> None:
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
@@ -1789,12 +1853,13 @@ def test_gc_dry_run_rejects_a_symlinked_release_root_ancestor(tmp_path: Path) ->
     real_parent.mkdir()
     linked_parent = tmp_path / "linked-parent"
     linked_parent.symlink_to(real_parent, target_is_directory=True)
-    checkout = linked_parent / "hermes-agent"
-    checkout.mkdir()
-    release = build_completed_release(helper, checkout, tmp_path / "release-work")
+    real_checkout = real_parent / "hermes-agent"
+    real_checkout.mkdir()
+    release = build_completed_release(helper, real_checkout, tmp_path / "release-work")
+    linked_checkout = linked_parent / "hermes-agent"
 
     with pytest.raises(RuntimeError, match="symlinked ancestor"):
-        helper.plan_release_gc(checkout, runtime_references=set())
+        helper.plan_release_gc(linked_checkout, runtime_references=set())
 
     assert release.release.is_dir()
 
@@ -2204,6 +2269,101 @@ def test_managed_launcher_executes_only_selected_release(tmp_path: Path) -> None
     rejected = subprocess.run([str(launcher)], capture_output=True, text=True, check=False)
     assert rejected.returncode != 0
     assert "invalid Hermes release selector" in rejected.stderr
+
+
+def test_managed_launcher_requires_complete_stable_selector_read(tmp_path: Path) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+
+    payload = helper.launcher_payload(layout, helper.BASELINE_ABSENT).decode("utf-8")
+
+    assert "while remaining:" in payload
+    assert "len(data)!=opened.st_size" in payload
+
+
+@pytest.mark.parametrize("unsafe_kind", ["writable", "hardlinked"])
+def test_managed_launcher_rejects_unsafe_selector_leaf(
+    tmp_path: Path, unsafe_kind: str
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    executable = layout.release / "venv/bin/hermes"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    layout.selector.write_bytes(helper.selector_payload(layout))
+    if unsafe_kind == "writable":
+        layout.selector.chmod(0o666)
+    else:
+        (tmp_path / "selector-peer").hardlink_to(layout.selector)
+    launcher = tmp_path / "managed-hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run([str(launcher)], capture_output=True, text=True, check=False)
+
+    assert completed.returncode != 0
+    assert "invalid Hermes release selector" in completed.stderr
+
+
+@pytest.mark.parametrize("unsafe_kind", ["writable", "hardlinked"])
+def test_managed_launcher_rejects_unsafe_selected_executable_leaf(
+    tmp_path: Path, unsafe_kind: str
+) -> None:
+    helper = load_helper()
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    marker = tmp_path / "unsafe-executable-ran"
+    executable = layout.release / "venv/bin/hermes"
+    executable.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    if unsafe_kind == "writable":
+        executable.chmod(0o777)
+    else:
+        (tmp_path / "executable-peer").hardlink_to(executable)
+    layout.selector.write_bytes(helper.selector_payload(layout))
+    launcher = tmp_path / "managed-hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+
+    completed = subprocess.run([str(launcher)], capture_output=True, text=True, check=False)
+
+    assert completed.returncode != 0
+    assert "invalid Hermes release selector" in completed.stderr
+    assert not marker.exists()
+
+
+def test_managed_launcher_rejects_release_root_beneath_writable_ancestor(
+    tmp_path: Path,
+) -> None:
+    helper = load_helper()
+    unsafe_parent = tmp_path / "unsafe-release-parent"
+    unsafe_parent.mkdir(mode=0o700)
+    checkout = unsafe_parent / "hermes-agent"
+    checkout.mkdir()
+    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    marker = tmp_path / "attacker-executed"
+    executable = layout.release / "venv/bin/hermes"
+    executable.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    layout.selector.write_bytes(helper.selector_payload(layout))
+    launcher = tmp_path / "managed-hermes"
+    launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
+    launcher.chmod(0o755)
+    unsafe_parent.chmod(0o777)
+
+    completed = subprocess.run([str(launcher)], capture_output=True, text=True, check=False)
+
+    assert completed.returncode != 0
+    assert "invalid Hermes release selector" in completed.stderr
+    assert not marker.exists()
 
 
 def test_managed_launcher_blocks_native_update_before_selector_access(tmp_path: Path) -> None:

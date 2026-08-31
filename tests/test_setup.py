@@ -598,6 +598,36 @@ def test_setup_and_uninstall_round_trip_a_denormalized_checkout(tmp_path: Path) 
     assert not (checkout / ".releases").exists()
 
 
+@pytest.mark.parametrize("root_spelling", ["/", "//", "/./", "/././"])
+def test_setup_rejects_filesystem_root_checkout_before_writes(
+    tmp_path: Path, root_spelling: str
+) -> None:
+    env, log = fake_env(tmp_path)
+    env["HERMES_AGENT_REPO"] = root_spelling
+
+    result = run_script(SETUP, tmp_path, "--no-restart", "--skip-smoke", env_extra=env)
+
+    assert result.returncode != 0
+    assert "filesystem root" in result.stderr
+    assert not log.exists()
+    assert not (tmp_path / ".local").exists()
+
+
+@pytest.mark.parametrize("root_spelling", ["/", "//", "/./", "/././"])
+def test_setup_rejects_filesystem_root_hermes_home_before_writes(
+    tmp_path: Path, root_spelling: str
+) -> None:
+    env, log = fake_env(tmp_path)
+    env["HERMES_HOME"] = root_spelling
+
+    result = run_script(SETUP, tmp_path, "--no-restart", "--skip-smoke", env_extra=env)
+
+    assert result.returncode != 0
+    assert "HERMES_HOME must not be the filesystem root" in result.stderr
+    assert not log.exists()
+    assert not (tmp_path / ".local").exists()
+
+
 def test_setup_rejects_traversal_in_the_hermes_checkout_before_writes(
     tmp_path: Path,
 ) -> None:

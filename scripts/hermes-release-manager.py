@@ -397,14 +397,29 @@ def _expected_collision_status(
 
 
 def _ensure_private_root(root: Path) -> None:
-    try:
-        root.mkdir(mode=0o700)
-    except FileExistsError:
+    _validate_real_directory_ancestry(root.parent)
+
+    def validate_root() -> None:
+        _validate_real_directory_ancestry(root)
         info = os.lstat(root)
-        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            raise RuntimeError(f"release root is not a real directory: {root}")
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+        ):
+            raise RuntimeError(f"release root is not an owner-controlled real directory: {root}")
         if stat.S_IMODE(info.st_mode) != 0o700:
             raise RuntimeError(f"release root must have mode 0700: {root}")
+
+    created = False
+    try:
+        root.mkdir(mode=0o700)
+        created = True
+    except FileExistsError:
+        validate_root()
+    _fsync_directory(root.parent)
+    if created:
+        validate_root()
 
 
 def _rename_exclusive(source: Path, destination: Path) -> None:
@@ -509,19 +524,40 @@ if first_positional(arguments)=="update" and tuple(arguments) not in allowed_upd
  print("Activate the reviewed release with:\n  ./scripts/update-hermes-if-needed.sh",file=sys.stderr)
  raise SystemExit(2)
 flags=os.O_RDONLY|getattr(os,"O_CLOEXEC",0)|getattr(os,"O_NOFOLLOW",0)
+def safe_directory_chain(path):
+ if not os.path.isabs(path) or os.path.normpath(path)!=path:
+  raise ValueError
+ current=os.path.sep
+ components=[part for part in path.split(os.path.sep) if part]
+ for component in [None]+components:
+  if component is not None:
+   current=os.path.join(current,component)
+  info=os.lstat(current)
+  if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid not in (0,os.getuid()) or stat.S_IMODE(info.st_mode)&0o022:
+   raise ValueError
 try:
+ safe_directory_chain(root)
  before=os.lstat(selector)
  fd=os.open(selector,flags)
  opened=os.fstat(fd)
- data=os.read(fd,4097)
+ chunks=[]
+ remaining=4097
+ while remaining:
+  chunk=os.read(fd,remaining)
+  if not chunk:
+   break
+  chunks.append(chunk)
+  remaining-=len(chunk)
+ data=b"".join(chunks)
  after=os.lstat(selector)
  os.close(fd)
  sig=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
- if not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or sig(before)!=sig(opened) or sig(opened)!=sig(after) or len(data)>4096:
+ if not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.getuid() or stat.S_IMODE(opened.st_mode)&0o022 or opened.st_nlink!=1 or sig(before)!=sig(opened) or sig(opened)!=sig(after) or len(data)!=opened.st_size or len(data)>4096:
   raise ValueError
  release=data.decode("utf-8").removesuffix("\n")
  if "\n" in release or os.path.dirname(release)!=root or re.fullmatch(r"release-[0-9a-f]{40}",os.path.basename(release)) is None:
   raise ValueError
+ safe_directory_chain(release)
  release_info=os.lstat(release)
  if not stat.S_ISDIR(release_info.st_mode) or stat.S_ISLNK(release_info.st_mode):
   raise ValueError
@@ -534,8 +570,9 @@ try:
  if not stat.S_ISDIR(lazy_info.st_mode) or stat.S_ISLNK(lazy_info.st_mode) or stat.S_IMODE(lazy_info.st_mode)!=0o700 or lazy_info.st_uid!=os.getuid():
   raise ValueError
  executable=os.path.join(release,"venv","bin","hermes")
+ safe_directory_chain(os.path.dirname(executable))
  executable_info=os.lstat(executable)
- if not stat.S_ISREG(executable_info.st_mode) or stat.S_ISLNK(executable_info.st_mode) or executable_info.st_mode & 0o111 == 0:
+ if not stat.S_ISREG(executable_info.st_mode) or stat.S_ISLNK(executable_info.st_mode) or executable_info.st_uid!=os.getuid() or stat.S_IMODE(executable_info.st_mode)&0o022 or executable_info.st_nlink!=1 or executable_info.st_mode & 0o111 == 0:
   raise ValueError
 except (OSError,UnicodeError,ValueError):
  print("invalid Hermes release selector",file=sys.stderr)

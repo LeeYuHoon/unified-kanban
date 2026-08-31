@@ -81,9 +81,51 @@ AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
 case "$HERMES_HOME$AGENT_REPO" in
   *$'\n'*) echo "Hermes paths must not contain newlines" >&2; exit 1 ;;
 esac
+# Derive one lexical normal form before anything is computed from it, without
+# requiring ambient Python on a host that bootstrap is responsible for tooling.
+# Traversal is rejected rather than resolved; existing path ancestry is then
+# validated no-follow by the bootstrap helper before setup writes.
+normalize_absolute_path() {
+  local path="$1" label="$2" remainder component normalized=""
+  remainder="${path#/}"
+  while [[ -n "$remainder" ]]; do
+    if [[ "$remainder" == */* ]]; then
+      component="${remainder%%/*}"
+      remainder="${remainder#*/}"
+    else
+      component="$remainder"
+      remainder=""
+    fi
+    case "$component" in
+      ""|.) continue ;;
+      ..)
+        echo "$label must not contain traversal components: $path" >&2
+        return 1
+        ;;
+      *) normalized="$normalized/$component" ;;
+    esac
+  done
+  if [[ -z "$normalized" ]]; then
+    echo "$label must not be the filesystem root: $path" >&2
+    return 1
+  fi
+  printf '%s\n' "$normalized"
+}
+HERMES_HOME="$(normalize_absolute_path "$HERMES_HOME" HERMES_HOME)" || exit 1
+AGENT_REPO="$(normalize_absolute_path "$AGENT_REPO" HERMES_AGENT_REPO)" || exit 1
 BOOTSTRAP_RECEIPT="$STATE_DIR/hermes-bootstrap.receipt"
 BOOTSTRAP_HELPER="$REPO_ROOT/scripts/bootstrap-hermes-macos.sh"
 HERMES_BOOTSTRAP_MANAGED=0
+shopt -s nullglob
+BOOTSTRAP_RECEIPT_CANDIDATES=("$STATE_DIR"/.hermes-bootstrap.receipt.*)
+shopt -u nullglob
+if [[ -d "$AGENT_REPO" ]]; then
+  PATH_STATUS="$("$BOOTSTRAP_HELPER" --validate-paths "$AGENT_REPO" "$HERMES_HOME")" || exit 1
+  [[ "$PATH_STATUS" == paths-safe ]] || {
+    echo "Unexpected Hermes path validation status: $PATH_STATUS" >&2
+    exit 1
+  }
+fi
 if [[ ! -d "$AGENT_REPO" ]]; then
   if command -v hermes >/dev/null 2>&1; then
     echo "Hermes Agent checkout not found at $AGENT_REPO; a foreign Hermes command is present, so automatic install is refused." >&2
@@ -105,7 +147,7 @@ if [[ ! -d "$AGENT_REPO" ]]; then
     exit 1
   }
   HERMES_BOOTSTRAP_MANAGED=1
-elif [[ -e "$BOOTSTRAP_RECEIPT" || -L "$BOOTSTRAP_RECEIPT" ]]; then
+elif [[ -e "$BOOTSTRAP_RECEIPT" || -L "$BOOTSTRAP_RECEIPT" || "${#BOOTSTRAP_RECEIPT_CANDIDATES[@]}" -gt 0 ]]; then
   BOOTSTRAP_STATUS="$("$BOOTSTRAP_HELPER" --status "$AGENT_REPO" "$HERMES_HOME")" || exit 1
   [[ "$BOOTSTRAP_STATUS" == bootstrap-complete ]] || {
     echo "Unexpected Hermes bootstrap status: $BOOTSTRAP_STATUS" >&2
@@ -174,12 +216,6 @@ HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_PLUGIN_SOURCE="$REPO_ROOT/integrations/hermes/hermes-kanban"
 HERMES_PLUGIN_TARGET="$HERMES_HOME/plugins/hermes-kanban"
 LEGACY_HERMES_PLUGIN_SOURCE="$(dirname "$REPO_ROOT")/hermes-kanban/plugin/hermes-kanban"
-# Derive one normal form before anything is computed from it. Concatenating
-# ".releases" onto a denormalized path would name a hidden directory inside the
-# Hermes checkout while every Python caller keeps using the sibling, so the
-# launcher would read a selector setup never wrote.
-AGENT_REPO="$(PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -m kanban_adapter.release_layout "$AGENT_REPO")" || exit 1
 HERMES_RELEASE_ROOT="${AGENT_REPO}.releases"
 HERMES_RELEASE_SELECTOR="$HERMES_RELEASE_ROOT/current"
 HERMES_LAUNCHER="$HOME/.local/bin/hermes"

@@ -300,6 +300,27 @@ def test_setup_refuses_missing_agent_checkout_before_any_write(tmp_path: Path) -
     assert not any("plugins enable" in call for call in hermes_calls(env))
 
 
+def test_setup_refuses_existing_checkout_beneath_writable_ancestor_before_any_write(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    original_repo = Path(env["HERMES_AGENT_REPO"])
+    unsafe_parent = tmp_path / "unsafe-agent-parent"
+    unsafe_parent.mkdir(mode=0o700)
+    agent_repo = unsafe_parent / "hermes-agent"
+    original_repo.rename(agent_repo)
+    unsafe_parent.chmod(0o777)
+    env["HERMES_AGENT_REPO"] = str(agent_repo)
+
+    result = run(SETUP, env, "--skip-smoke")
+
+    assert result.returncode != 0
+    assert "writable ancestor" in result.stderr.lower()
+    assert not plugin_target(tmp_path).exists()
+    assert not (tmp_path / ".local/bin/kanban-adapter").exists()
+    assert not any("plugins enable" in call for call in hermes_calls(env))
+
+
 def test_setup_dry_run_makes_no_plugin_changes(tmp_path: Path) -> None:
     env = environment(tmp_path)
 
@@ -392,6 +413,12 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
     source_hermes.chmod(0o755)
     env["FAKE_HERMES_EXECUTABLE"] = str(source_hermes)
     (fake_bin / "hermes").unlink()
+    managed_python = tmp_path / "bootstrap-managed-python3"
+    managed_python.write_bytes((fake_bin / "python3").read_bytes())
+    managed_python.chmod(0o755)
+    (fake_bin / "python3").write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+    (fake_bin / "python3").chmod(0o755)
+    env["FAKE_MANAGED_PYTHON"] = str(managed_python)
     for command in ("uv", "npm"):
         executable = fake_bin / command
         executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -406,6 +433,7 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
     bootstrap.write_text(
         "#!/bin/bash\n"
         "set -eu\n"
+        "if [ \"${1:-}\" = --validate-paths ]; then printf 'paths-safe\\n'; exit 0; fi\n"
         "if [ \"${1:-}\" = --status ]; then\n"
         "  if [ -f \"${XDG_STATE_HOME}/unified-kanban/hermes-bootstrap.receipt\" ]; then echo bootstrap-complete; else echo bootstrap-absent; fi\n"
         "  exit 0\n"
@@ -413,8 +441,9 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
         "printf '%s\\n' \"$@\" >>\"$BOOTSTRAP_TEST_LOG\"\n"
         "repo=$1\n"
         "home=$2\n"
-        "mkdir -p \"$repo\" \"$HOME/.local/bin\" "
+        "mkdir -p \"$repo/venv/bin\" \"$HOME/.local/bin\" "
         "\"${XDG_STATE_HOME}/unified-kanban\"\n"
+        "ln -s \"$FAKE_MANAGED_PYTHON\" \"$repo/venv/bin/python3\"\n"
         "cp \"$FAKE_HERMES_EXECUTABLE\" \"$HOME/.local/bin/hermes\"\n"
         "chmod +x \"$HOME/.local/bin/hermes\"\n"
         "cat >\"${XDG_STATE_HOME}/unified-kanban/hermes-bootstrap.receipt\" <<EOF\n"
@@ -439,7 +468,7 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
         env["HERMES_AGENT_REPO"],
         str(tmp_path / ".hermes"),
     ]
-    assert activation_failure_marker.is_file()
+    assert activation_failure_marker.is_file(), failed.stderr
     assert not any("plugins enable" in call for call in hermes_calls(env))
     assert not Path(env["HERMES_AGENT_REPO"] + ".releases/current").exists()
     assert (
@@ -506,6 +535,38 @@ def test_fresh_macos_bootstrap_survives_activation_failure_and_retries_deferred_
     assert not foreign_activation_marker.exists()
 
 
+def test_setup_invokes_status_for_candidate_only_bootstrap_retry(tmp_path: Path) -> None:
+    env = environment(tmp_path)
+    state = tmp_path / ".local/state/unified-kanban"
+    state.mkdir(parents=True)
+    (state / ".hermes-bootstrap.receipt.retry-authority").write_text(
+        "candidate\n", encoding="utf-8"
+    )
+    status_marker = tmp_path / "status-called"
+    ambient_python_marker = tmp_path / "ambient-python-called"
+    bootstrap = Path(env["_TEST_ROOT"]) / "scripts/bootstrap-hermes-macos.sh"
+    bootstrap.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = --validate-paths ]; then echo paths-safe; exit 0; fi\n'
+        f'if [ "${1:-}" = --status ]; then /usr/bin/touch {shlex.quote(str(status_marker))}; exit 73; fi\n'
+        "exit 74\n",
+        encoding="utf-8",
+    )
+    bootstrap.chmod(0o755)
+    fake_python = Path(env["PATH"].split(":", 1)[0]) / "python3"
+    fake_python.write_text(
+        f"#!/bin/sh\n/usr/bin/touch {shlex.quote(str(ambient_python_marker))}\nexit 75\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(SETUP, env)
+
+    assert result.returncode != 0
+    assert status_marker.exists()
+    assert not ambient_python_marker.exists()
+
+
 def test_bootstrap_managed_setup_finds_uv_in_hermes_home_bin(tmp_path: Path) -> None:
     env = environment(tmp_path)
     create_verified_bootstrap_artifacts(tmp_path, Path(env["HERMES_AGENT_REPO"]))
@@ -536,6 +597,7 @@ def test_bootstrap_managed_setup_finds_uv_in_hermes_home_bin(tmp_path: Path) -> 
     bootstrap = Path(env["_TEST_ROOT"]) / "scripts/bootstrap-hermes-macos.sh"
     bootstrap.write_text(
         "#!/bin/sh\n"
+        "if [ \"${1:-}\" = --validate-paths ]; then printf 'paths-safe\\n'; exit 0; fi\n"
         "if [ \"${1:-}\" = --status ]; then printf 'bootstrap-complete\\n'; exit 0; fi\n"
         "exit 97\n",
         encoding="utf-8",
