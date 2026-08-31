@@ -14,8 +14,7 @@ unified-kanban/
 ├── src/kanban_adapter/          # provider normalization, state, usage and Hermes CLI backend
 ├── tests/                       # adapter, hook, installer, updater and compatibility tests
 ├── .github/                     # CI, scheduled compatibility checks and contribution templates
-├── README.md                    # Korean primary guide and architecture overview
-├── README.en.md                 # concise English entry point
+├── README.md                    # 한국어 설치 및 사용 안내
 ├── CONTRIBUTING.md              # development and review policy
 ├── SECURITY.md                  # private reporting and trust boundaries
 ├── THIRD_PARTY_NOTICES.md       # Hermes Agent copyright and MIT notice for the carried bundle

@@ -12,8 +12,7 @@ The Korean README already described the user problem, architecture, installation
 
 ### Added or clarified
 
-- `README.en.md`: concise English overview, advantages, support boundary, quick start, development links.
-- `README.md`: language link, directory/code policy, test model, GitHub maintenance, 03:00 KST upstream check, contribution/security/license links.
+- `README.md`: 한국어 프로젝트 소개, 지원 범위, 설치와 사용 안내.
 - `docs/project-structure.md`: directory tree, module responsibilities, dependency direction, comments/docstrings policy, refactoring assessment.
 - `docs/maintenance.md`: branch/release policy, PR gates, dependencies, security, backup/rollback, maintainer duties, daily upstream workflow.
 - `CHANGELOG.md`: Keep a Changelog / semantic-version release record beginning with `Unreleased`.

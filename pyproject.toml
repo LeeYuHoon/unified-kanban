@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "unified-kanban"
 version = "0.1.0"
 description = "Repository-contained adapters connecting Hermes Kanban to external coding agents"
-readme = "README.en.md"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]

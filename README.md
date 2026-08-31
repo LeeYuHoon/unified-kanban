@@ -1,7 +1,5 @@
 # Unified Kanban
 
-[English](README.en.md) | 한국어
-
 Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주는 프로젝트입니다.
 
 > 현재 macOS만 지원합니다.
