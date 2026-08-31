@@ -115,7 +115,7 @@ class ProviderSelectionTests(ThreeProviderCliBase):
         self.assertIn("--claude-root", out + err)
 
     def test_ambiguous_selector_across_providers_lists_qualified_candidates(self):
-        # "1" appears in every provider's session id
+        # "1"은 모든 제공자의 세션 ID에 나타난다.
         code, out, err = run(["prompts", "1"] + self.all_args())
         self.assertEqual(code, 2)
         msg = out + err
@@ -246,7 +246,7 @@ class ProviderOutputGuardTests(unittest.TestCase):
         link = os.path.join(self.tmp.name, "link-to-codex")
         try:
             os.symlink(os.path.join(self.home, ".codex"), link)
-        except (OSError, NotImplementedError):  # pragma: no cover - platform guard
+        except (OSError, NotImplementedError):  # pragma: no cover - 플랫폼별 보호 조건
             self.skipTest("symlinks unavailable")
         with self.assertRaises(csv_mod.OutputPathError) as ctx:
             csv_mod.validate_out_path(os.path.join(link, "leak.md"), home=self.home)

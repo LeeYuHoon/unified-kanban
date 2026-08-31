@@ -58,10 +58,10 @@ class ListTests(CliBase):
         self.assertIn(fixtures.SESSION_ID[:8], out)
         self.assertIn("session-a", out)
         self.assertIn("session-b", out)
-        self.assertIn("21", out)  # event count
-        self.assertIn("Refactor the JSONL", out)  # first real prompt preview
+        self.assertIn("21", out)  # 이벤트 수
+        self.assertIn("Refactor the JSONL", out)  # 첫 번째 실제 프롬프트 미리보기
         self.assertIn("UTC", out)
-        self.assertNotIn("Session resumed from checkpoint", out)  # meta record
+        self.assertNotIn("Session resumed from checkpoint", out)  # 메타 레코드
 
     def test_list_redacts_cwd_by_default(self):
         _, out, _ = run(["list", "--root", self.root, "--home", "/Users/testuser"])
@@ -213,7 +213,7 @@ class ExportTests(CliBase):
         alias = os.path.join(self.outdir, "source-alias.md")
         try:
             os.link(self.path_b, alias)
-        except (OSError, NotImplementedError):  # pragma: no cover - platform guard
+        except (OSError, NotImplementedError):  # pragma: no cover - 플랫폼별 보호 조건
             self.skipTest("hard links unavailable")
         before = read_bytes(self.path_b)
         code, out, err = run(
@@ -230,7 +230,7 @@ class ExportTests(CliBase):
         alias = os.path.join(self.outdir, "source-link.md")
         try:
             os.symlink(self.path_a, alias)
-        except (OSError, NotImplementedError):  # pragma: no cover - platform guard
+        except (OSError, NotImplementedError):  # pragma: no cover - 플랫폼별 보호 조건
             self.skipTest("symlinks unavailable")
         before = read_bytes(self.path_a)
         code, out, err = run(

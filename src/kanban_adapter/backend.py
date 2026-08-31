@@ -1,4 +1,4 @@
-"""Validated Hermes Kanban CLI boundary used by every observation adapter."""
+"""모든 observation 어댑터가 사용하는 검증된 Hermes Kanban CLI 경계."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ _FD_FILE_RE = re.compile(r"--(?:title|result)-file=/dev/fd/([0-9]+)\Z")
 
 
 class BoardNotMappedError(RuntimeError):
-    """No dashboard board project directory contains the current directory."""
+    """현재 디렉터리를 포함하는 dashboard 보드 프로젝트 디렉터리가 없다."""
 
 
 def run_command(argv: list[str]) -> str:
-    """Run a Hermes command and return stdout, raising with sanitized diagnostics."""
+    """Hermes 명령을 실행해 stdout을 반환하고, 실패 시 정제된 진단과 함께 예외를 던진다."""
     pass_fds = tuple(sorted({
         int(match.group(1))
         for argument in argv
@@ -52,12 +52,12 @@ _IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}\Z")
 
 @dataclass
 class HermesCliBackend:
-    """Create and mutate validated observation cards through the Hermes CLI."""
+    """Hermes CLI를 통해 검증된 observation 카드를 생성하고 변경한다."""
 
     runner: Runner = run_command
 
     def resolve_board(self, *, cwd: Path) -> str:
-        """Select the uniquely deepest Dashboard project mapping containing ``cwd``."""
+        """``cwd``를 포함하는 매핑 중 유일하게 가장 깊은 Dashboard 프로젝트 매핑을 선택한다."""
         raw = self.runner(["hermes", "kanban", "boards", "list", "--json"])
         try:
             boards = json.loads(raw)
@@ -115,7 +115,7 @@ class HermesCliBackend:
         title_file: Path | None = None,
         idempotency_key: str | None = None,
     ) -> str:
-        """Create a running observation card and return its validated task id."""
+        """running 상태의 observation 카드를 생성하고 검증된 task id를 반환한다."""
         if source not in _SOURCE:
             raise ValueError(f"unsupported source: {source}")
         if (title is None) == (title_file is None):
@@ -169,9 +169,9 @@ class HermesCliBackend:
         if not isinstance(task_id, str) or not _TASK_RE.fullmatch(task_id):
             raise RuntimeError("Hermes create response did not contain a valid task id")
         if payload.get("status") != "running" or payload.get("observation") is not True:
-            # Idempotent create may return a pre-existing row. Without a
-            # creation token we cannot prove this call owns the returned task,
-            # so compensating with ``complete`` could terminate unrelated work.
+            # 멱등(idempotent) create는 기존에 있던 행을 반환할 수 있다. 생성
+            # 토큰이 없으면 이 호출이 반환된 task를 소유한다고 증명할 수 없으므로,
+            # ``complete``로 보상(compensate)하면 무관한 작업을 종료시킬 수 있다.
             raise RuntimeError(
                 "Hermes create did not return a running observation card"
             )
@@ -185,7 +185,7 @@ class HermesCliBackend:
         message: str,
         idempotency_key: str | None = None,
     ) -> None:
-        """Append a comment, atomically at most once per ``idempotency_key``."""
+        """댓글을 추가하되, ``idempotency_key``당 원자적으로 최대 한 번만 추가한다."""
         argv = [
             "hermes", "kanban", "--board", board, "comment",
             "--author", "kanban-adapter",
@@ -206,7 +206,7 @@ class HermesCliBackend:
         result_file: Path | None = None,
         summary: str | None = None,
     ) -> None:
-        """Complete a card while keeping full result and concise summary separate."""
+        """전체 result와 간결한 summary를 분리해 유지하면서 카드를 완료한다."""
         argv = ["hermes", "kanban", "--board", board, "complete"]
         if result is not None and result_file is not None:
             raise ValueError("result and result_file are mutually exclusive")
@@ -218,14 +218,14 @@ class HermesCliBackend:
         if result is not None:
             argv.append(f"--result={result}")
         if summary:
-            # Keep the concise handoff separate from the complete assistant
-            # result. `--opt=<text>` binds leading-hyphen user data safely.
+            # 간결한 handoff를 어시스턴트의 전체 result와 분리해 유지한다.
+            # `--opt=<text>` 형식은 하이픈으로 시작하는 사용자 데이터를 안전하게 바인딩한다.
             argv.append(f"--summary={summary}")
         argv.extend(["--", task_id])
         self.runner(argv)
 
     def block(self, *, board: str, task_id: str, reason: str) -> None:
-        """Block an observation card when explicit user input is required."""
+        """명시적인 사용자 입력이 필요할 때 observation 카드를 block 상태로 만든다."""
         self.runner([
             "hermes", "kanban", "--board", board, "block",
             "--kind", "needs_input", "--", task_id, reason,

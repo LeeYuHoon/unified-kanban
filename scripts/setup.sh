@@ -81,10 +81,10 @@ AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
 case "$HERMES_HOME$AGENT_REPO" in
   *$'\n'*) echo "Hermes paths must not contain newlines" >&2; exit 1 ;;
 esac
-# Derive one lexical normal form before anything is computed from it, without
-# requiring ambient Python on a host that bootstrap is responsible for tooling.
-# Traversal is rejected rather than resolved; existing path ancestry is then
-# validated no-follow by the bootstrap helper before setup writes.
+# 부트스트랩이 도구 설치를 책임지는 호스트에서 기존 Python을 요구하지 않고, 이
+# 경로에서 무엇이든 계산하기 전에 하나의 어휘적 정규형을 유도한다. 경로 순회는
+# 해석하는 대신 거부하며, setup이 쓰기 전에 부트스트랩 도우미가 기존 경로 조상을
+# 심볼릭 링크를 따라가지 않는 방식으로 검증한다.
 normalize_absolute_path() {
   local path="$1" label="$2" remainder component normalized=""
   remainder="${path#/}"
@@ -276,8 +276,8 @@ PY
     HERMES_RELEASE="$(python3 "$REPO_ROOT/scripts/hermes-release-manager.py" prepare \
       "$AGENT_REPO" "$SUPPORTED_UPSTREAM" "$FINAL_CARRIED_COMMIT" "$CARRIED_BUNDLE" \
       --uv "$REAL_UV" --npm "$NPM_BIN")"
-    # The release the producer built and the release this shell will select must
-    # be the same path, proven before anything on the host is mutated.
+    # 생산자가 빌드한 릴리스와 이 shell이 선택할 릴리스는 같은 경로여야 하며,
+    # 호스트의 어떤 것도 변경하기 전에 이를 입증한다.
     [[ "$HERMES_RELEASE" == "$TARGET_RELEASE" ]] || {
       echo "prepared release is not the reviewed target: $HERMES_RELEASE" >&2
       exit 1
@@ -572,10 +572,10 @@ if ((!DRY_RUN)); then
   TRANSACTION_TOKEN="$(python3 "$REPO_ROOT/scripts/path-transaction.py" begin \
     "$TRANSACTION_RECEIPT" "${TRANSACTION_PATHS[@]}")"
 
-  # The managed launcher carries a producer-issued binding to the exact bytes
-  # this install displaces, so uninstall can never adopt a foreign, injected, or
-  # deleted launcher backup. Both branches derive the binding from the frozen
-  # transaction snapshot rather than from a re-read of the live path.
+  # 관리형 실행기는 이 설치가 대체하는 정확한 바이트에 대해 생산자가 발급한
+  # 바인딩을 담으므로, 제거 과정이 외부에서 교체·삽입·삭제된 실행기 백업을 받아들일
+  # 수 없다. 두 분기 모두 라이브 경로를 다시 읽지 않고 고정된 트랜잭션 스냅샷에서
+  # 바인딩을 유도한다.
   RETAINED_HERMES_BACKUP="$TRANSACTION_DIR/hermes-launcher-retained"
   python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
     "$TRANSACTION_RECEIPT" "$HERMES_LAUNCHER_BACKUP" "$RETAINED_HERMES_BACKUP"
@@ -587,13 +587,12 @@ if ((!DRY_RUN)); then
     python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
       "$TRANSACTION_RECEIPT" "$HERMES_LAUNCHER" "$ORIGINAL_HERMES_LAUNCHER"
     if [[ -f "$ORIGINAL_HERMES_LAUNCHER" ]]; then
-      # A rerun finds our own launcher here, not the user's. Retaining it would
-      # record the managed launcher as the "original" and make uninstall restore
-      # a launcher whose selector it just deleted, so ask the producer whether
-      # this is one of ours before treating it as something worth preserving.
-      # Exit 3 is the release manager's "provably not our launcher" verdict.
-      # Anything else is an internal fault and must never be read as a verdict,
-      # so it fails closed with the reason instead of silently retaining.
+      # 재실행 시 여기서 발견되는 것은 사용자의 실행기가 아니라 우리 실행기다. 이를
+      # 보존하면 관리형 실행기를 "원본"으로 기록하여 제거 과정이 방금 선택자를 삭제한
+      # 실행기를 복원하게 된다. 따라서 보존할 대상으로 취급하기 전에 생산자에게 우리
+      # 실행기인지 확인한다. 종료 코드 3은 릴리스 관리자의 "우리 실행기가 아님이
+      # 입증됨" 판정이다. 다른 모든 결과는 내부 오류이며 판정으로 해석해서는 안 되므로,
+      # 조용히 보존하지 않고 이유를 제시하며 닫힌 상태로 실패한다.
       LAUNCHER_CLASSIFY_ERROR="$TRANSACTION_DIR/hermes-launcher-classify-error"
       set +e
       INSTALLED_BASELINE="$(python3 "$REPO_ROOT/scripts/hermes-release-manager.py" \
@@ -713,9 +712,8 @@ if [[ -n "$PROJECT_DIR" ]]; then
   fi
 fi
 
-# Install every executable before settings can reference it. If a link cannot
-# be created, provider settings remain untouched instead of retaining a broken
-# managed hook command.
+# 설정이 실행 파일을 참조할 수 있게 되기 전에 모든 실행 파일을 설치한다. 링크를
+# 만들 수 없으면 손상된 관리형 훅 명령을 남기지 않고 제공자 설정을 변경하지 않는다.
 link_repo_file "$REPO_ROOT/bin/kanban-adapter" "$HOME/.local/bin/kanban-adapter"
 link_repo_file "$REPO_ROOT/bin/claude-kanban-hook" "$CLAUDE_HOOK_LINK"
 link_repo_file "$REPO_ROOT/bin/codex-kanban-hook" "$CODEX_HOOK_LINK"

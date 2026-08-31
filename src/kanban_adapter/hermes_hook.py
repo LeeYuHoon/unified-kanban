@@ -1,4 +1,4 @@
-"""Hermes user-turn observation lifecycle and auxiliary-work exclusion policy."""
+"""Hermes 사용자 턴 observation 생명주기와 보조 작업 제외 정책."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 def is_auxiliary_hermes_turn(user_message: str) -> bool:
-    """Identify internal Hermes work that must not create duplicate Kanban cards."""
+    """중복 Kanban 카드를 만들면 안 되는 Hermes 내부 작업을 식별한다."""
     if any(os.environ.get(name) for name in _AUXILIARY_PROCESS_MARKERS):
         return True
     message = user_message.lstrip()
@@ -74,7 +74,7 @@ def is_auxiliary_hermes_turn(user_message: str) -> bool:
 
 
 def hermes_runtime_cwd() -> Path:
-    """Resolve Hermes' per-session cwd, falling back outside Hermes runtime."""
+    """Hermes의 세션별 cwd를 결정하고, Hermes 런타임 밖에서는 폴백을 사용한다."""
     try:
         from agent.runtime_cwd import resolve_agent_cwd
     except ImportError:
@@ -83,15 +83,15 @@ def hermes_runtime_cwd() -> Path:
 
 
 def default_cache_root() -> Path:
-    """Return the private cache root used to bridge Hermes lifecycle hooks."""
+    """Hermes 생명주기 훅들을 잇는 데 사용하는 전용(private) 캐시 루트를 반환한다."""
     root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     return root / "unified-kanban" / "hermes-turns"
 
 
 class TurnTracker:
-    """Per-turn Hermes Agent card lifecycle: pre_llm_call starts a running card,
-    on_session_end completes the same card. Board routing reuses the unified
-    dashboard project-directory resolution from HermesCliBackend."""
+    """턴 단위 Hermes Agent 카드 생명주기: pre_llm_call이 running 카드를 시작하고,
+    on_session_end가 같은 카드를 완료한다. 보드 라우팅은 HermesCliBackend의
+    통합 대시보드 프로젝트 디렉터리 결정 로직을 재사용한다."""
 
     def __init__(
         self,
@@ -191,7 +191,7 @@ class TurnTracker:
         platform: str,
         model: Any = None,
     ) -> None:
-        """Create state for a real user turn, ignoring internal auxiliary turns."""
+        """실제 사용자 턴에 대한 상태를 생성하고, 내부 보조 턴은 무시한다."""
         if not session_id or not turn_id or not isinstance(user_message, str):
             return
         if is_auxiliary_hermes_turn(user_message):
@@ -244,18 +244,18 @@ class TurnTracker:
                 result.get("status") != "running"
                 or result.get("observation") is not True
             ):
-                # Idempotent create may return a pre-existing row. Without a
-                # creation token we cannot prove this call owns the returned
-                # task, so never compensate a contract mismatch by completing
-                # it.
+                # 멱등한 create는 이미 존재하던 행을 반환할 수 있다. 생성
+                # 토큰이 없으면 이 호출이 반환된 태스크를 소유한다는 것을
+                # 증명할 수 없으므로, 계약 불일치를 그 카드를 완료하는
+                # 방식으로 보상(compensate)해서는 절대 안 된다.
                 raise RuntimeError(
                     "Hermes create did not return a running observation card"
                 )
-            # Idempotent create may have returned an observation owned by an
-            # earlier duplicate invocation. If local state persistence fails,
-            # we cannot prove this call created the card, so completing it as
-            # compensation could terminate another live turn. Leave it running;
-            # the normal owner will complete it, or orphan expiry will close it.
+            # 멱등한 create는 앞서 중복 호출이 소유한 observation을 반환했을
+            # 수 있다. 로컬 상태 영속화가 실패하면 이 호출이 그 카드를
+            # 생성했다는 것을 증명할 수 없으므로, 보상으로 카드를 완료하면
+            # 살아 있는 다른 턴을 종료시킬 수 있다. running 상태로 남겨 둔다.
+            # 정상 소유자가 완료하거나, 고아(orphan) 만료가 닫을 것이다.
             state: dict[str, Any] = {"board": board, "task_id": task_id}
             resolved_model = sanitize_model(model)
             if resolved_model:
@@ -269,10 +269,10 @@ class TurnTracker:
                 os.close(directory_fd)
 
     def _mutate(self, session_id: str, turn_id: str, apply):
-        """Run ``apply(state)`` under the turn lock, persisting any change.
+        """턴 락을 잡은 채 ``apply(state)``를 실행하고, 변경이 있으면 영속화한다.
 
-        No-ops when the turn has no live card, so observer hooks that fire
-        outside a tracked turn (or after completion) stay harmless.
+        턴에 살아 있는 카드가 없으면 아무 일도 하지 않으므로, 추적되지 않는
+        턴 밖에서(또는 완료 이후에) 발화하는 관찰자 훅은 무해하게 유지된다.
         """
         if not session_id or not turn_id:
             return
@@ -316,9 +316,9 @@ class TurnTracker:
         status: Any = None,
         **_ignored: Any,
     ) -> None:
-        """Count one ``post_tool_call``. Only the sanitized name is kept —
-        ``args``/``result`` are accepted so the hook signature matches Hermes
-        and are deliberately never read beyond the skill-name argument."""
+        """``post_tool_call`` 하나를 집계한다. 정제된 이름만 보관한다 —
+        ``args``/``result``는 훅 시그니처를 Hermes와 맞추기 위해 받을 뿐이며,
+        스킬 이름 인자 외에는 의도적으로 결코 읽지 않는다."""
         entry = classify_tool(_SOURCE, tool_name, args)
         if entry is None:
             return
@@ -337,13 +337,13 @@ class TurnTracker:
         child_role: Any = None,
         **_ignored: Any,
     ) -> None:
-        """Count one delegated child from ``subagent_start``. This is the
-        authoritative subagent signal: a single ``delegate_task`` call can fan
-        out to several children, so counting the tool call would undercount."""
+        """``subagent_start``에서 위임된 자식 하나를 집계한다. 이것이 권위
+        있는 subagent 신호다: ``delegate_task`` 호출 한 번이 여러 자식으로
+        확산될 수 있으므로, 도구 호출을 세면 실제보다 적게 집계된다."""
         name = classify_subagent(child_role)
         if name is None:
-            # Outside the identifier whitelist: recorded nowhere, not as a
-            # placeholder either.
+            # 식별자 화이트리스트 밖: 어디에도 기록하지 않으며,
+            # 자리표시자로도 기록하지 않는다.
             return
 
         def apply(state: dict[str, Any]) -> None:
@@ -360,7 +360,7 @@ class TurnTracker:
         model: Any = None,
         **_ignored: Any,
     ) -> None:
-        """Store the complete final response plus its bounded card summary."""
+        """완전한 최종 응답과, 크기가 제한된 카드용 요약을 함께 저장한다."""
         summary = concise_summary(assistant_response)
         result = (
             assistant_response
@@ -393,11 +393,11 @@ class TurnTracker:
         usage: Any,
         **_ignored: Any,
     ) -> None:
-        """Accumulate one canonical ``post_api_request`` usage payload.
+        """정규화된 ``post_api_request`` 사용량 페이로드 하나를 누적한다.
 
-        Request identifiers are hashed before local persistence and never reach
-        the card. The hash makes replayed hooks idempotent without retaining a
-        provider request id.
+        요청 식별자는 로컬 영속화 전에 해시되며 카드에는 결코 도달하지
+        않는다. 이 해시 덕분에 제공자 요청 id를 보관하지 않고도 재생된
+        훅이 멱등해진다.
         """
         if not isinstance(api_request_id, str) or not api_request_id:
             return
@@ -426,9 +426,9 @@ class TurnTracker:
             if request_hash in request_ids:
                 return False
             if len(request_ids) >= 512:
-                # Refuse to drop old ids: doing so could make a later replay
-                # count twice. A normal Hermes turn stays far below this bound;
-                # warn rather than silently under-reporting an abnormal turn.
+                # 오래된 id를 버리기를 거부한다: 버리면 나중의 재생이 두 번
+                # 집계될 수 있다. 정상적인 Hermes 턴은 이 한도에 한참 못
+                # 미친다. 비정상적인 턴을 조용히 과소 보고하는 대신 경고한다.
                 logger.warning("Hermes Kanban token request cap reached")
                 return False
             request_ids.append(request_hash)
@@ -466,8 +466,9 @@ class TurnTracker:
             return identity
         if not has_reportable_usage(_SOURCE, usage):
             return identity
-        # Hermes enforces the key under the same DB write transaction as the
-        # comment insert, so concurrent or post-crash retries cannot duplicate.
+        # Hermes는 코멘트 삽입과 동일한 DB 쓰기 트랜잭션 안에서 키를
+        # 강제하므로, 동시 재시도나 크래시 이후의 재시도가 중복을 만들 수
+        # 없다.
         event_id = usage_event_id(_SOURCE, task_id)
         message = usage_comment(
             source=_SOURCE,
@@ -487,7 +488,8 @@ class TurnTracker:
                 ])
             except Exception as exc:
                 if attempt == 2:
-                    # Telemetry must not strand the card after bounded retries.
+                    # 제한된 재시도 이후에는 텔레메트리가 카드를 고아로
+                    # 만들어서는 안 된다.
                     logger.warning("Hermes Kanban usage comment failed: %s", exc)
                 continue
             break
@@ -512,7 +514,7 @@ class TurnTracker:
         completed: bool,
         interrupted: bool,
     ) -> None:
-        """Complete an existing turn card and remove state only after success."""
+        """기존 턴 카드를 완료하고, 성공한 이후에만 상태를 제거한다."""
         directory_fd = self._ensure_cache()
         try:
             lock_fd = self._open_turn_lock(session_id, turn_id, directory_fd)
@@ -534,8 +536,8 @@ class TurnTracker:
                 identity.close()
                 raise RuntimeError("turn state task id is invalid")
             if interrupted or not completed:
-                # Abnormal completion always says so plainly; the turn's own
-                # words could otherwise imply the work finished.
+                # 비정상 완료는 항상 그 사실을 명시적으로 말한다. 그렇지
+                # 않으면 턴 자신의 문장이 작업이 끝났다고 암시할 수 있다.
                 summary = "Hermes turn ended without normal completion"
                 result = summary
             else:
@@ -573,8 +575,8 @@ class TurnTracker:
                 result_identity.close()
                 raise
 
-            # Large results travel through a 0600 file rather than argv so
-            # platform command-line limits cannot truncate or reject them.
+            # 큰 결과는 argv 대신 0600 파일을 통해 전달되므로, 플랫폼의
+            # 명령줄 길이 제한이 이를 자르거나 거부할 수 없다.
             try:
                 self.runner([
                     "hermes", "kanban", "--board", board, "complete",

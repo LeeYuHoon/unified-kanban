@@ -1,13 +1,13 @@
 #!/bin/sh
-# AI Session Viewer — lightweight, idempotent setup.
+# AI Session Viewer — 가볍고 멱등적인 설정.
 #
-# This script deliberately does NOT install anything: no pip, no venv, no
-# symlinks, no PATH or shell-config edits, no files outside this repository.
-# It only (1) marks the CLI executable and (2) runs a self-test in a temporary
-# directory that is removed on exit. Safe to run repeatedly.
+# 이 스크립트는 의도적으로 아무것도 설치하지 않는다. pip, venv, 심볼릭 링크,
+# PATH나 shell 설정 수정, 저장소 외부 파일 생성을 전혀 하지 않는다.
+# (1) CLI를 실행 가능하게 표시하고 (2) 종료 시 제거되는 임시 디렉터리에서 자체
+# 테스트를 실행할 뿐이다. 반복 실행해도 안전하다.
 #
-# The self-test uses synthetic Claude / Codex / Hermes fixtures only. It never
-# reads ~/.claude, ~/.codex or ~/.hermes.
+# 자체 테스트는 합성 Claude / Codex / Hermes 픽스처만 사용한다. ~/.claude,
+# ~/.codex, ~/.hermes는 절대 읽지 않는다.
 
 set -eu
 
@@ -21,14 +21,14 @@ say "AI Session Viewer — setup (read-only viewer, no install)"
 say "providers: Claude Code, OpenAI Codex CLI, Hermes Agent"
 say "repo: $REPO_DIR"
 
-# 1. Python check ------------------------------------------------------------
+# 1. Python 검사 -------------------------------------------------------------
 command -v python3 >/dev/null 2>&1 || fail "python3 not found on PATH"
 say "python3: $(python3 --version 2>&1)  ($(command -v python3))"
 
 [ -f "$CLI" ] || fail "missing $CLI"
 
-# 2. Make the CLI runnable (idempotent) --------------------------------------
-# The executable keeps its historical name so old invocations keep working.
+# 2. CLI를 실행 가능하게 만들기(멱등적) -------------------------------------
+# 기존 호출이 계속 동작하도록 실행 파일의 과거 이름을 유지한다.
 if [ -x "$CLI" ]; then
   say "executable bit: already set"
 else
@@ -36,7 +36,7 @@ else
   say "executable bit: set on claude_session_viewer.py"
 fi
 
-# 3. Self-test in a temp dir -------------------------------------------------
+# 3. 임시 디렉터리에서 자체 테스트 ------------------------------------------
 TMPDIR_SELFTEST=$(mktemp -d "${TMPDIR:-/tmp}/asv-selftest.XXXXXX")
 cleanup() { rm -rf "$TMPDIR_SELFTEST"; }
 trap cleanup EXIT INT TERM
@@ -62,7 +62,7 @@ def digest(path):
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest(), st.st_mtime_ns
 
-# --- synthetic Claude transcript -------------------------------------------
+# --- 합성 Claude 대화 기록 --------------------------------------------------
 claude_root = os.path.join(tmp, "claude", "projects", "selftest")
 os.makedirs(claude_root)
 claude_path = os.path.join(claude_root, "selftest-session.jsonl")
@@ -80,9 +80,9 @@ claude_records = [
 with open(claude_path, "w", encoding="utf-8") as fh:
     for rec in claude_records:
         fh.write(json.dumps(rec) + "\n")
-    fh.write('{"truncated": ')  # malformed trailing line, on purpose
+    fh.write('{"truncated": ')  # 의도적으로 잘못 만든 마지막 줄
 
-# --- synthetic Codex rollout ------------------------------------------------
+# --- 합성 Codex 롤아웃 -------------------------------------------------------
 codex_root = os.path.join(tmp, "codex", "sessions", "2026", "01", "01")
 os.makedirs(codex_root)
 codex_path = os.path.join(codex_root, "rollout-selftest.jsonl")
@@ -110,14 +110,14 @@ codex_records = [
 with open(codex_path, "w", encoding="utf-8") as fh:
     for rec in codex_records:
         fh.write(json.dumps(rec) + "\n")
-    fh.write("{not json")  # malformed trailing line, on purpose
+    fh.write("{not json")  # 의도적으로 잘못 만든 마지막 줄
 
-# these two must never be treated as sessions
+# 이 두 파일은 절대 세션으로 처리하면 안 된다.
 for noise in ("history.jsonl", "session_index.jsonl"):
     with open(os.path.join(tmp, "codex", "sessions", noise), "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"text": "bookkeeping, not a session"}) + "\n")
 
-# --- synthetic Hermes state.db ----------------------------------------------
+# --- 합성 Hermes state.db ----------------------------------------------------
 hermes_db = os.path.join(tmp, "hermes", "state.db")
 os.makedirs(os.path.dirname(hermes_db))
 conn = sqlite3.connect(hermes_db)
@@ -163,7 +163,7 @@ before = dict((name, digest(path)) for name, path in sources.items())
 claude_arg = os.path.join(tmp, "claude", "projects")
 codex_arg = os.path.join(tmp, "codex", "sessions")
 
-# --- 1. list, per provider and aggregated -----------------------------------
+# --- 1. 제공자별 및 통합 목록 ------------------------------------------------
 out = run(["list", "--provider", "claude", "--root", claude_arg])
 assert "selftest-0001" in out and "does the viewer work?" in out, out
 assert "malformed" in out, out
@@ -182,17 +182,17 @@ out = run(["list", "--provider", "all",
 for needle in ("Claude", "Codex", "Hermes", "selftest-0001", "selftest-codex-1", "Self test"):
     assert needle in out, (needle, out)
 
-# --- 2. prompts: synthetic/internal records filtered out --------------------
+# --- 2. 프롬프트: 합성/내부 레코드 제외 -------------------------------------
 out = run(["prompts", "selftest-0001", "--provider", "claude", "--root", claude_arg])
 assert "1 prompt" in out and "noise" not in out, out
 out = run(["prompts", "selftest-codex-1", "--provider", "codex", "--root", codex_arg])
-assert "1 prompt" in out, out              # the response_item duplicate is suppressed
+assert "1 prompt" in out, out              # 중복 response_item은 제외됨
 out = run(["prompts", "7", "--provider", "hermes", "--root", hermes_db])
-assert "1 prompt" in out, out              # display_kind=internal is suppressed
+assert "1 prompt" in out, out              # display_kind=internal은 제외됨
 assert "internal planner note" not in out, out
 assert "rolled back" not in out, out
 
-# --- 3. timeline: replies shown, reasoning/tool output never --------------
+# --- 3. 타임라인: 응답은 표시하되 추론/도구 출력은 절대 표시하지 않음 -------
 out = run(["timeline", "selftest-0001", "--provider", "claude", "--root", claude_arg])
 assert "yes, it works." in out and "Claude:" in out, out
 assert "private deliberation" not in out and "1 thinking block" in out, out
@@ -210,7 +210,7 @@ assert "private hermes reasoning" not in out, out
 assert "private hermes tool output" not in out, out
 assert "read_file" in out, out
 
-# --- 4. exports -------------------------------------------------------------
+# --- 4. 내보내기 -------------------------------------------------------------
 for provider, root, selector, heading, badge in (
     ("claude", claude_arg, "selftest-0001", "# Claude Session", "badge-claude"),
     ("codex", codex_arg, "selftest-codex-1", "# Codex Session", "badge-codex"),
@@ -232,19 +232,19 @@ for provider, root, selector, heading, badge in (
     for bad in ("http://", "https://", "<script src"):
         assert bad not in page, (provider, bad)
 
-# --- 5. output-path guard for all three provider data dirs ------------------
+# --- 5. 세 제공자 데이터 디렉터리 모두에 대한 출력 경로 보호 ----------------
 for guarded in ("~/.claude/nope.md", "~/.codex/nope.md", "~/.hermes/nope.md"):
     out = run(["export", "selftest-0001", "--provider", "claude", "--root", claude_arg,
                "--format", "markdown", "--out", guarded], expect=2)
     assert "Refusing to write" in out, out
     assert not os.path.exists(os.path.expanduser(guarded)), "guard breached: %s" % guarded
 
-# traversal must be caught too
+# 경로 순회도 탐지해야 한다.
 out = run(["export", "selftest-0001", "--provider", "claude", "--root", claude_arg,
            "--format", "markdown", "--out", "~/docs/../.codex/nope.md"], expect=2)
 assert "Refusing to write" in out, out
 
-# --- 6. every source is byte- and mtime-identical ---------------------------
+# --- 6. 모든 소스의 바이트와 mtime이 동일함 ---------------------------------
 for name, path in sources.items():
     assert before[name] == digest(path), "source modified: %s" % name
 

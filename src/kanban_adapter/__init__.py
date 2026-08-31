@@ -1,3 +1,3 @@
-"""Unified Kanban adapter package."""
+"""Unified Kanban 어댑터 패키지."""
 
 __version__ = "0.1.0"

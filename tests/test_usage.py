@@ -83,8 +83,8 @@ def test_usage_comment_includes_sanitized_token_breakdown() -> None:
     }
 
 
-# Values a hostile or confused runtime could put where a name belongs. None of
-# them is a legal identifier, so none may ever reach state or a comment.
+# 적대적이거나 잘못된 런타임이 이름 자리에 넣을 수 있는 값이다. 어느 것도 유효한
+# 식별자가 아니므로 상태나 주석에 절대 도달해서는 안 된다.
 HOSTILE_NAMES = [
     "/Users/alice/private/key.pem",
     "../../etc/passwd",
@@ -107,19 +107,18 @@ HOSTILE_NAMES = [
 ]
 
 
-# Opaque, secret-shaped tokens that are *legal* under the identifier grammar
-# and short enough to slip past the 32-character blob rule. They carry no
-# reporting value and may be credentials, so they must be refused outright.
+# 식별자 문법상 *유효*하고 32자 블롭 규칙을 빠져나갈 만큼 짧지만 비밀처럼 생긴
+# 불투명 토큰이다. 보고 가치가 없고 자격 증명일 수 있으므로 즉시 거부해야 한다.
 OPAQUE_NAMES = [
-    # The reviewer's sample: 29 characters, alternating case, few digits.
+    # 검토자가 제시한 예: 29자이며 대소문자가 번갈아 나오고 숫자는 적다.
     "AbCdEfGhIjKlMnOpQrStUvWxYz123",
-    # AWS-shaped access key id: 20 characters, all upper case, no digits.
+    # AWS 형태의 액세스 키 ID: 20자이며 모두 대문자이고 숫자는 없다.
     "AKIAABCDEFGHIJKLMNOP",
     "AKIAIOSFODNN7EXAMPLE",
     "aKbLcMdNeOfPgQhRiSjT",
     "XyZaBcDeFgHiJkLmNoPq",
     "GHIJKLMNOPQRSTUVWXYZ",
-    # Mixed case with digits mixed through, still under 32 characters.
+    # 대소문자와 숫자가 섞여 있지만 여전히 32자 미만이다.
     "a1B2c3D4e5F6g7H8i9J0",
     "Tk3nAbCd5EfGh7IjKl9M",
 ]
@@ -127,8 +126,8 @@ OPAQUE_NAMES = [
 
 @pytest.mark.parametrize("name", OPAQUE_NAMES)
 def test_opaque_secret_like_names_are_rejected(name: str) -> None:
-    """Rejected at ``sanitize_identifier``, so classification and stale-state
-    cleaning both refuse it without either needing its own rule."""
+    """``sanitize_identifier``에서 거부되므로 분류와 오래된 상태 정리 모두 별도
+    규칙 없이 이 값을 거부한다."""
     assert sanitize_identifier(name) is None
     assert classify_tool("claude-code", "Skill", {"skill": name}) is None
     assert classify_tool("claude-code", "Task", {"subagent_type": name}) is None
@@ -145,8 +144,8 @@ def test_opaque_secret_like_names_are_rejected(name: str) -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        # Real names the reviewer's tightened rule must not catch: long, but
-        # word-shaped rather than high-entropy.
+        # 검토자가 강화한 규칙이 잡아서는 안 되는 실제 이름이다. 길지만 고엔트로피가
+        # 아닌 단어 형태다.
         "openaiDeveloperDocs",
         "general-purpose",
         "plugin:skill",
@@ -177,12 +176,12 @@ def test_usage_categories_are_stable() -> None:
         ("hermes-agent", "skill_view", {"name": "axolotl"}, ("skills", "axolotl")),
         ("hermes-agent", "skill_view", {"name": "a", "file_path": "refs/x.md"}, ("skills", "a")),
         ("hermes-agent", "skills_list", {}, None),
-        # delegate_task fans out to N children; subagent_start is authoritative.
+        # delegate_task는 N개의 자식으로 분기하며 subagent_start가 권위 있는 기준이다.
         ("hermes-agent", "delegate_task", {"goal": "secret goal"}, None),
         ("hermes-agent", "terminal", {"command": "cat /etc/passwd"}, None),
         ("codex", "exec_command", {"command": "ls"}, None),
         ("codex", "spawn_agent", {"prompt": "secret"}, None),
-        # MCP naming convention is shared by all three runtimes.
+        # MCP 명명 규칙은 세 런타임이 공유한다.
         ("claude-code", "mcp__github__search_issues", {}, ("mcp", "github/search_issues")),
         ("hermes-agent", "mcp__linear__get_issue", {}, ("mcp", "linear/get_issue")),
         ("codex", "mcp__openaiDeveloperDocs__fetch_openai_doc", {},
@@ -194,7 +193,7 @@ def test_classify_tool_per_runtime(runtime, tool_name, tool_input, expected) -> 
 
 
 def test_classify_tool_falls_back_to_unknown_name() -> None:
-    """A structurally absent name carries nothing to leak, so it stays counted."""
+    """구조적으로 이름이 없으면 유출할 내용도 없으므로 계속 집계한다."""
     assert classify_tool("claude-code", "Skill", {}) == ("skills", "unknown")
     assert classify_tool("hermes-agent", "skill_view", {"name": 7}) == ("skills", "unknown")
     assert classify_tool("codex", "mcp__srv__", {}) == ("mcp", "srv/unknown")
@@ -211,7 +210,7 @@ def test_classify_tool_rejects_non_string_tool_names() -> None:
         "dataviz",
         "claude-api",
         "general-purpose",
-        # Plugin-qualified skills must survive untouched.
+        # 플러그인 한정 스킬은 변경 없이 유지되어야 한다.
         "kanban:review",
         "my-plugin:deploy-app",
         "a.b_c-d:e",
@@ -231,7 +230,7 @@ def test_legitimate_identifiers_are_preserved(name: str) -> None:
 
 @pytest.mark.parametrize("name", HOSTILE_NAMES)
 def test_hostile_identifiers_are_rejected_outright(name: str) -> None:
-    """Rejected, not stored as ``unknown``: a bad name must not be counted."""
+    """``unknown``으로 저장하지 않고 거부한다. 잘못된 이름은 집계하면 안 된다."""
     assert sanitize_identifier(name) is None
     assert classify_tool("claude-code", "Skill", {"skill": name}) is None
     assert classify_tool("hermes-agent", "skill_view", {"name": name}) is None
@@ -250,8 +249,8 @@ def test_mcp_names_keep_exactly_one_structural_slash() -> None:
         "mcp",
         "github/search_issues",
     )
-    # The separator is structural, never part of a segment, and never legal in
-    # a plain identifier -- which is what keeps paths out of skill names.
+    # 구분자는 구조적 요소로 세그먼트의 일부가 아니며 일반 식별자에서는 절대
+    # 유효하지 않다. 덕분에 경로가 스킬 이름에 들어오지 못한다.
     assert sanitize_identifier("srv/tool") is None
     assert classify_tool("claude-code", "Skill", {"skill": "srv/tool"}) is None
     assert classify_subagent("srv/tool") is None
@@ -292,7 +291,7 @@ def test_clean_usage_drops_unknown_categories_and_bad_counts() -> None:
 
 @pytest.mark.parametrize("name", HOSTILE_NAMES)
 def test_clean_usage_drops_invalid_stale_names(name: str) -> None:
-    """Stale state is an untrusted input: a hostile key never survives."""
+    """오래된 상태는 신뢰할 수 없는 입력이므로 적대적 키는 절대 남지 않는다."""
     cleaned = clean_usage(
         {"skills": {name: 3, "dataviz": 1}, "subagents": {name: 2}, "mcp": {name: 4}}
     )
@@ -312,7 +311,7 @@ def test_clean_usage_enforces_the_mcp_two_segment_shape() -> None:
             }
         }
     ) == {"mcp": {"github/search_issues": 1}}
-    # A slash is structural to MCP alone; it is not a legal skill name.
+    # 슬래시는 MCP에서만 구조적 요소이며 유효한 스킬 이름이 아니다.
     assert clean_usage({"skills": {"github/search_issues": 1}}) == {}
 
 
@@ -347,7 +346,7 @@ def test_sanitize_model_accepts_known_shapes_and_rejects_junk() -> None:
 def test_unavailable_categories_documents_runtime_limits() -> None:
     assert unavailable_categories("claude-code") == ()
     assert unavailable_categories("hermes-agent") == ()
-    # No Codex 0.145 hook event carries a skill name.
+    # Codex 0.145 훅 이벤트에는 스킬 이름이 들어 있지 않다.
     assert unavailable_categories("codex") == ("skills",)
     assert unavailable_categories("something-else") == ()
 
@@ -356,15 +355,15 @@ def _decode(comment: str) -> dict:
     header, _, body = comment.partition("\n")
     payload = json.loads(body)
     assert header == usage_comment_header(payload["source"])
-    # Every comment is self-describing; the version is asserted once here so
-    # the per-field assertions below stay about the usage data itself.
+    # 모든 주석은 자체 설명적이다. 아래의 필드별 검증이 사용량 데이터 자체에만
+    # 집중하도록 여기서 버전을 한 번 검증한다.
     expected_version = 2 if "tokens" in payload else 1
     assert payload.pop("schema_version") == expected_version
     return payload
 
 
 def test_claude_header_stays_byte_for_byte_compatible() -> None:
-    """Consumers written against the original Claude-only comment still work."""
+    """기존 Claude 전용 주석을 기준으로 작성된 소비자도 계속 동작한다."""
     comment = usage_comment(
         source="claude-code",
         model="claude-opus-5",
@@ -372,7 +371,7 @@ def test_claude_header_stays_byte_for_byte_compatible() -> None:
         unavailable=(),
     )
     header, newline, body = comment.partition("\n")
-    # The header the first shipped version emitted, reproduced exactly.
+    # 최초 배포 버전이 출력한 헤더를 정확히 재현한다.
     assert header == "Agent tool usage"
     assert newline == "\n"
     legacy = json.loads(body)
@@ -383,8 +382,8 @@ def test_claude_header_stays_byte_for_byte_compatible() -> None:
 
 
 def test_headers_are_source_specific() -> None:
-    # Claude Code shipped first and keeps the neutral original header; only the
-    # sources added afterwards may name themselves.
+    # Claude Code가 먼저 배포되어 중립적인 원본 헤더를 유지하며, 이후 추가된 소스만
+    # 자체 이름을 표시할 수 있다.
     assert usage_comment_header("claude-code") == "Agent tool usage"
     assert usage_comment_header("codex") == "Codex tool usage"
     assert usage_comment_header("hermes-agent") == "Hermes Agent tool usage"
@@ -397,7 +396,7 @@ def test_usage_event_id_is_deterministic_per_card() -> None:
     assert first != usage_event_id("claude-code", "t_87654321")
     assert first != usage_event_id("codex", "t_12345678")
     assert first.startswith("usage-")
-    # The marker is a plain token, safe to search for in a comment body.
+    # 마커는 일반 토큰이므로 주석 본문에서 안전하게 검색할 수 있다.
     assert first == "".join(first.split())
 
 
@@ -417,9 +416,9 @@ def test_usage_comment_carries_the_event_marker_when_given_one() -> None:
 @pytest.mark.parametrize(
     "event_id",
     [
-        "a1234567",  # the shortest legal id: 8 characters
-        "usage-" + "0" * 32,  # what usage_event_id itself produces
-        "A" + "b.c-d_e" * 18 + "f",  # 128 characters, the longest legal id
+        "a1234567",  # 가장 짧은 유효 ID: 8자
+        "usage-" + "0" * 32,  # usage_event_id 자체가 생성하는 값
+        "A" + "b.c-d_e" * 18 + "f",  # 가장 긴 유효 ID인 128자
     ],
 )
 def test_usage_comment_keeps_event_ids_inside_the_grammar(event_id: str) -> None:
@@ -432,22 +431,22 @@ def test_usage_comment_keeps_event_ids_inside_the_grammar(event_id: str) -> None
 @pytest.mark.parametrize(
     "event_id",
     [
-        "short7",  # 6 characters: below the 8-character floor
-        "abcdefg",  # 7 characters: still one short
-        "-leading",  # must open with an alphanumeric
+        "short7",  # 6자: 최소 길이 8자 미만
+        "abcdefg",  # 7자: 여전히 한 자 부족함
+        "-leading",  # 영숫자로 시작해야 함
         "has space",
-        "has:colon",  # the idempotency grammar has no ``:``
+        "has:colon",  # 멱등성 문법에는 ``:``가 없음
         "../../etc/passwd",
         "line\nbreak",
         "nul\x00byte",
-        "usage-" + "0" * 200,  # 206 characters: past the 128 ceiling
-        7,  # not a string at all
+        "usage-" + "0" * 200,  # 206자: 최대 길이 128자를 초과함
+        7,  # 문자열이 전혀 아님
         "",
     ],
 )
 def test_usage_comment_omits_event_ids_outside_the_grammar(event_id) -> None:
-    """An illegal marker is dropped, never rendered: it cannot be honoured as
-    an idempotency key, and echoing it would put unvalidated text on a card."""
+    """잘못된 마커는 렌더링하지 않고 버린다. 멱등성 키로 인정할 수 없으며 이를
+    그대로 출력하면 검증되지 않은 텍스트가 카드에 들어간다."""
     comment = usage_comment(
         source="claude-code",
         model="claude-opus-5",
@@ -462,8 +461,8 @@ def test_usage_comment_omits_event_ids_outside_the_grammar(event_id) -> None:
 
 
 def test_usage_comment_survives_a_10000_char_event_id() -> None:
-    """Regression: an oversized marker must not leak, and must not push the
-    comment past its limit or out of valid JSON."""
+    """회귀 테스트: 지나치게 큰 마커는 유출되거나 주석을 제한 밖으로 밀어내거나
+    유효하지 않은 JSON으로 만들어서는 안 된다."""
     event_id = "u" + "a1" * 4999 + "z"
     assert len(event_id) == 10_000
     comment = usage_comment(
@@ -474,7 +473,7 @@ def test_usage_comment_survives_a_10000_char_event_id() -> None:
         event_id=event_id,
     )
     assert len(comment) <= 4000
-    payload = _decode(comment)  # still parseable JSON, not a sliced fragment
+    payload = _decode(comment)  # 잘린 조각이 아니라 여전히 파싱 가능한 JSON이다.
     assert "event_id" not in payload
     assert event_id not in comment
     assert event_id[:200] not in comment
@@ -520,7 +519,7 @@ def test_usage_comment_is_bounded_and_flags_truncation() -> None:
     payload = _decode(comment)
     assert len(payload["mcp"]) == 25
     assert payload["truncated"] is True
-    # Highest counts survive truncation.
+    # 가장 높은 집계 값은 잘린 뒤에도 남는다.
     assert "srv/tool199" in payload["mcp"]
     assert len(comment) <= 4000
 
@@ -785,7 +784,7 @@ def test_concise_summary_collapses_and_bounds() -> None:
 
 
 def _stress_name(prefix: str, index: int, *, mcp: bool = False) -> str:
-    """A legal identifier at the maximum length, worst case for comment size."""
+    """주석 크기에 최악인 최대 길이의 유효 식별자."""
     body = (f"{prefix}-{index:04d}" + "-ab" * 24)[:63] + "z"
     return f"srv-{index:04d}/{body}" if mcp else body
 
@@ -803,8 +802,8 @@ def _all_categories_at_limit() -> dict:
 @pytest.mark.parametrize(
     "name",
     [
-        # Multi-byte names are outside the whitelist, so they can never reach a
-        # comment in the first place -- rejection replaces byte-budget guessing.
+        # 멀티바이트 이름은 허용 목록 밖이므로 애초에 주석에 도달할 수 없다. 바이트
+        # 예산을 추측하는 대신 거부한다.
         "도구이름",
         "🙂🙃",
         "ЖЖЖ",
@@ -828,7 +827,7 @@ def test_usage_comment_stays_valid_json_at_every_limit() -> None:
         event_id=usage_event_id("hermes-agent", "t_12345678"),
     )
     assert len(comment) <= 4000
-    payload = _decode(comment)  # must parse; never a hard-sliced fragment
+    payload = _decode(comment)  # 반드시 파싱되어야 하며 강제로 잘린 조각이어서는 안 된다.
     assert payload["truncated"] is True
     assert payload["source"] == "hermes-agent"
     assert payload["model"] == "claude-fable-5"
@@ -845,7 +844,7 @@ def test_usage_comment_keeps_highest_counts_when_it_must_shrink() -> None:
     )
     kept = payload["mcp"]
     assert kept
-    # Whatever survived must be the top-counted entries, contiguously.
+    # 남은 것은 집계 값이 가장 높은 엔트리들이며 연속되어야 한다.
     lowest_kept = min(kept.values())
     assert all(count > len(usage["mcp"]) - len(kept) - 1 for count in kept.values())
     assert lowest_kept == max(kept.values()) - len(kept) + 1

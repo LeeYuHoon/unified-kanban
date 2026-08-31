@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Race-resistant management for repository-owned symlinks."""
+"""저장소가 소유한 심볼릭 링크의 경쟁 조건에 강한 관리."""
 
 import argparse
 import ctypes

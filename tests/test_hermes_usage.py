@@ -17,8 +17,8 @@ def make_runner(
     result_contents: list[str] | None = None,
     title_contents: list[str] | None = None,
 ):
-    """Stand-in for the Hermes CLI that remembers the comments it was given,
-    so ``show --json`` answers truthfully and idempotency can be observed."""
+    """전달받은 주석을 기억하여 ``show --json``이 사실대로 응답하고 멱등성을
+    관찰할 수 있게 하는 Hermes CLI 대역."""
     posted: list[str] = []
     posted_keys: set[str] = set()
 
@@ -104,11 +104,11 @@ def comment_of(calls: list[list[str]]) -> str:
 
 
 def usage_payload(calls: list[list[str]], *, task_id: str = "t_12345678") -> dict:
-    """The one usage comment's payload, with its envelope asserted here.
+    """이곳에서 외피를 검증한 단일 사용량 주석의 페이로드.
 
-    Hermes cards carry the Hermes-specific header, the schema version, and the
-    deterministic event id used to deduplicate the comment -- so each caller
-    below keeps asserting the usage data itself, in full.
+    Hermes 카드는 Hermes 전용 헤더, 스키마 버전, 주석 중복 제거에 쓰이는 결정적
+    이벤트 ID를 담는다. 따라서 아래의 각 호출자는 사용량 데이터 자체를 완전히
+    검증한다.
     """
     header, newline, body = comment_of(calls).partition("\n")
     assert header == "Hermes Agent tool usage"
@@ -174,7 +174,7 @@ def test_subagent_start_counts_delegated_children_by_role(tmp_path: Path) -> Non
     tracker = make_tracker(tmp_path, calls)
     start_turn(tracker)
 
-    # One delegate_task fanning out to three children must count as three.
+    # 세 자식으로 분기하는 delegate_task 하나는 3회로 계산해야 한다.
     tracker.record_tool(
         session_id="s1", turn_id="t1", tool_name="delegate_task",
         args={"tasks": [{"goal": "secret"}] * 3}, result="", status="ok",
@@ -402,11 +402,10 @@ def test_usage_comment_transient_failure_is_retried(tmp_path: Path) -> None:
 def test_usage_comment_is_not_duplicated_when_the_marker_write_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The crash window: the comment was appended, the marker never recorded.
+    """충돌 발생 구간: 주석은 추가됐지만 마커는 기록되지 않았다.
 
-    With no local record that the comment went out, the only thing standing
-    between a retry and a duplicate is the deterministic event id, which is
-    looked up on the card itself before appending.
+    주석이 전송됐다는 로컬 기록이 없을 때 재시도와 중복 사이를 막는 유일한 것은
+    결정적 이벤트 ID이며, 추가하기 전에 카드 자체에서 이 ID를 조회한다.
     """
     calls: list[list[str]] = []
     tracker = make_tracker(tmp_path, calls, fail={"complete"})

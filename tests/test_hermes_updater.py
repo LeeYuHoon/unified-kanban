@@ -1,11 +1,10 @@
-"""Tests for the immutable Hermes release updater.
+"""불변 Hermes 릴리스 업데이터 테스트.
 
-The updater never mutates the Hermes checkout. It prepares an immutable release
-under ``<HERMES_AGENT_REPO>.releases`` and activates it by swapping one regular
-selector file inside a path transaction, restarting only the services that were
-running. These tests exercise that contract end to end with a faked release
-manager, so the real path transaction, state markers, and managed launcher are
-used unchanged.
+업데이터는 Hermes 체크아웃을 절대 변경하지 않는다. ``<HERMES_AGENT_REPO>.releases``
+아래에 불변 릴리스를 준비한 뒤 경로 트랜잭션 안에서 일반 선택자 파일 하나를
+교체하여 활성화하고, 실행 중이던 서비스만 재시작한다. 이 테스트들은 모의 릴리스
+관리자로 그 계약을 종단 간 검증하므로 실제 경로 트랜잭션, 상태 마커, 관리형
+실행기는 변경 없이 사용한다.
 """
 
 from __future__ import annotations
@@ -86,8 +85,8 @@ printf '%s\\n' "$*" >> "$CURL_TEST_LOG"
 if [[ -f "$HERMES_TEST_DASHBOARD_STATE" ]]; then exit 0; else exit 7; fi
 """
 
-# Installed by the faked release manager at <release>/venv/bin/hermes, so it is
-# only reachable through the managed launcher and the active selector.
+    # 모의 릴리스 관리자가 <release>/venv/bin/hermes에 설치하므로 관리형 실행기와
+    # 활성 선택자를 통해서만 접근할 수 있다.
 FAKE_GATEWAY_PYTHON = """\
 #!/usr/bin/env bash
 release="$(cd "$(dirname "$0")/../.." && pwd -P)"
@@ -188,7 +187,7 @@ exit 0
 
 
 def _python_shim(real_python: str) -> str:
-    """Fake only the release construction; everything else is the real helper."""
+    """릴리스 생성만 모의 처리하고 나머지는 모두 실제 도우미를 사용한다."""
     return (
         "#!/usr/bin/env bash\n"
         'if [[ $1 == */scripts/reload-macos-launchd-service.py ]]; then\n'
@@ -278,12 +277,12 @@ def environment(tmp_path: Path, *, install_launcher: bool = True) -> dict[str, s
     fake_bin.mkdir()
     home = tmp_path / "home"
     (home / ".local/bin").mkdir(parents=True)
-    # ~/Library is a pre-existing macOS platform directory, not updater-owned.
-    # Native tool launchers may populate Library/Caches while an update runs.
+    # ~/Library는 기존 macOS 플랫폼 디렉터리이며 업데이터 소유가 아니다.
+    # 업데이트 중 네이티브 도구 실행기가 Library/Caches에 파일을 만들 수 있다.
     (home / "Library").mkdir()
     agent_repo = tmp_path / "hermes-agent"
     agent_repo.mkdir()
-    # The checkout is a read-only input. Anything written into it is a defect.
+    # 체크아웃은 읽기 전용 입력이다. 여기에 무엇이든 쓰이면 결함이다.
     (agent_repo / "README").write_text("read-only input\n", encoding="utf-8")
     trusted_python = shlex.quote(sys.executable)
     runtime = tmp_path / "hermes-runtime"
@@ -500,7 +499,7 @@ def test_activation_selects_the_reviewed_release_and_restarts_the_gateway(
     assert f"release {CARRIED_HEAD} is active" in result.stdout
     assert pending_is_absent(env)
     assert not lock_dir(env).exists()
-    # The restarted service reached the reviewed release through the selector.
+    # 재시작된 서비스는 선택자를 통해 검토된 릴리스에 도달했다.
     assert Path(env["HERMES_TEST_RELEASE_MARKER"]).exists()
 
 
@@ -568,12 +567,12 @@ def test_previous_is_durable_before_current_moves_on_an_interrupted_activation(
 def test_activation_leaves_the_managed_launcher_and_its_binding_untouched(
     tmp_path: Path,
 ) -> None:
-    """An update must not rewrite the launcher's retained-original binding.
+    """업데이트는 실행기에 보존된 원본 바인딩을 다시 쓰면 안 된다.
 
-    Uninstall decides restore-versus-remove by re-deriving that binding and
-    requiring the installed launcher to match byte for byte. An updater that
-    re-rendered the launcher would silently unbind the retained backup, so
-    uninstall would refuse or, worse, act on the wrong baseline.
+    제거 과정은 해당 바인딩을 다시 유도하고 설치된 실행기가 바이트 단위로
+    일치하도록 요구하여 복원할지 제거할지 결정한다. 업데이터가 실행기를 다시
+    렌더링하면 보존된 백업의 바인딩이 조용히 풀리므로 제거가 거부되거나, 더 나쁘게는
+    잘못된 기준 상태를 대상으로 동작하게 된다.
     """
     env = environment(tmp_path, install_launcher=False)
     launcher = Path(env["HOME"]) / ".local/bin/hermes"
@@ -611,7 +610,7 @@ def test_activation_leaves_the_managed_launcher_and_its_binding_untouched(
 def test_activation_uses_one_normal_form_for_a_denormalized_checkout(
     tmp_path: Path,
 ) -> None:
-    """A trailing separator must not move the release root into the checkout."""
+    """후행 구분자가 릴리스 루트를 체크아웃 안으로 옮기면 안 된다."""
     env = environment(tmp_path)
     env["HERMES_AGENT_REPO"] = env["_TEST_AGENT_REPO"] + "/"
     before = checkout_snapshot(env)
@@ -659,10 +658,10 @@ def test_up_to_date_run_prepares_nothing_and_leaves_services_alone(
 
 
 def test_up_to_date_run_writes_no_state_and_takes_no_lock(tmp_path: Path) -> None:
-    """A run with nothing to do must not create state or take the lock.
+    """할 일이 없는 실행은 상태를 만들거나 잠금을 획득하면 안 된다.
 
-    The no-change decision is made from two reads, so it has to happen before
-    the state directory and the lock directory are created.
+    변경 없음 결정은 두 번의 읽기로 이루어지므로 상태 디렉터리와 잠금 디렉터리를
+    만들기 전에 수행되어야 한다.
     """
     env = environment(tmp_path)
     activate(env)
@@ -751,7 +750,7 @@ def test_stopped_dashboard_is_not_started_by_an_update(tmp_path: Path) -> None:
 def test_gateway_restart_failure_rolls_the_selector_back(tmp_path: Path) -> None:
     env = environment(tmp_path)
     activate(env)
-    # Re-point the selector at a superseded release so the next run activates.
+    # 다음 실행이 활성화하도록 선택자를 대체된 이전 릴리스로 다시 지정한다.
     superseded = release_root(env) / f"release-{'b' * 40}"
     superseded.mkdir()
     (superseded / "venv" / "bin").mkdir(parents=True)
@@ -1006,7 +1005,7 @@ def test_activation_preserves_a_foreign_selector_successor(tmp_path: Path) -> No
     result = run(racing)
 
     assert result.returncode != 0
-    # The successor inode is neither adopted as our publication nor removed.
+    # 후속 inode를 우리 게시물로 받아들이지도 제거하지도 않는다.
     assert selector(env).read_text(encoding="utf-8") == foreign
     assert "operation identity no longer present" in result.stderr
     assert log_lines(env, "HERMES_TEST_LOG") == []
@@ -1142,11 +1141,11 @@ def test_no_restart_activation_keeps_the_pending_restart(tmp_path: Path) -> None
 
 
 def clear_lock_left_by_a_killed_run(env: dict[str, str]) -> None:
-    """SIGKILL leaves the lock behind on purpose.
+    """SIGKILL은 의도적으로 잠금을 남긴다.
 
-    The updater never reclaims a lock it cannot prove is its own, so completing
-    a killed run is a deliberate manual step. That refusal has its own tests;
-    here it only has to be performed so the recovery path can be exercised.
+    업데이터는 자기 것임을 입증할 수 없는 잠금을 절대 회수하지 않으므로 강제 종료된
+    실행을 마치는 일은 의도적인 수동 단계다. 그 거부 동작은 별도 테스트가 있으며,
+    여기서는 복구 경로를 실행할 수 있도록 수행하기만 하면 된다.
     """
     assert lock_dir(env).is_symlink()
     lock_dir(env).unlink()
@@ -1165,8 +1164,8 @@ def test_interrupted_activation_is_resumed_instead_of_reported_up_to_date(
     crashed = run(crashing)
 
     assert crashed.returncode != 0
-    # The selection survived the kill, so a rerun must finish the restart
-    # instead of declaring the installation up to date.
+    # 선택 상태가 강제 종료 후에도 남았으므로 재실행은 설치가 최신이라고 선언하는
+    # 대신 재시작을 완료해야 한다.
     assert selector(env).read_text(encoding="utf-8") == f"{target_release(env)}\n"
     assert not pending_is_absent(env)
     assert log_lines(env, "HERMES_TEST_LOG") == []
@@ -1226,8 +1225,8 @@ def test_pending_cleanup_failure_does_not_undo_a_committed_activation(
 
     result = run(uncleanable)
 
-    # The activation and the restart both completed; a cleanup fault afterwards
-    # is not an incomplete update and must not roll the selection back.
+    # 활성화와 재시작이 모두 완료됐다. 이후의 정리 오류는 미완료 업데이트가 아니며
+    # 선택 상태를 롤백해서는 안 된다.
     assert result.returncode == 0, result.stderr
     assert selector(env).read_text(encoding="utf-8") == f"{target_release(env)}\n"
     assert log_lines(env, "HERMES_TEST_LOG") == ["gateway restart", "gateway status"]

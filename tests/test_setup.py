@@ -25,8 +25,8 @@ CARRIED_HEAD = [
 ][-1]
 
 
-# Publishing the receipt through the real producer keeps the fixture from
-# drifting away from the format the runtime gate has to trust.
+    # 실제 생산자를 통해 영수증을 게시하면 픽스처가 런타임 게이트가 신뢰해야 하는
+    # 형식에서 벗어나지 않는다.
 RELEASE_RECEIPT_HELPER = '''\
 """Give a faked release the producer's own completion receipt."""
 
@@ -109,11 +109,10 @@ def install_fake_hermes(
     script.write_text(
         "#!/usr/bin/env bash\n"
         "printf '%s\\n' \"$*\" >> \"$FAKE_HERMES_LOG\"\n"
-        # Probe inherited descriptors with fstat from a freshly exec'd process.
-        # `: <&N` only reports bash's own bookkeeping and claims fd10 is open
-        # after the parent closed it, and `readlink /dev/fd/N` always fails on
-        # Darwin because /dev/fd/N is a character device - both make the leak
-        # assertion vacuous.
+    # 새로 exec된 프로세스에서 fstat으로 상속된 디스크립터를 검사한다.
+    # `: <&N`은 bash 자체의 장부 상태만 보고하여 부모가 닫은 뒤에도 fd10이 열려
+    # 있다고 주장하고, Darwin에서는 /dev/fd/N이 문자 장치이므로
+    # `readlink /dev/fd/N`이 항상 실패한다. 둘 다 누출 검증을 무의미하게 만든다.
         "if [[ -n \"${FAKE_AUTHORITY_REPORT:-}\" && ( \"$*\" == 'gateway restart' "
         "|| \"$*\" == 'gateway install --force --start-now --start-on-login' "
         "|| \"$*\" == 'gateway status' || \"$*\" == 'gateway stop' "
@@ -222,8 +221,8 @@ def install_fake_hermes(
         "if [[ \"$1\" == '-C' ]]; then shift 2; fi\n"
         "case \"$*\" in\n"
         f"  '-c credential.helper= -c core.askPass= -c http.extraHeader= ls-remote https://github.com/NousResearch/hermes-agent.git refs/heads/main') echo \"${{FAKE_OFFICIAL_UPSTREAM:-{SUPPORTED_SHA}}} refs/heads/main\";;\n"
-        # No fake answer for `rev-parse HEAD`: nothing may decide compatibility
-        # from a checkout HEAD that no flow ever moves onto the carried tip.
+    # `rev-parse HEAD`에는 모의 응답이 없다. 어떤 흐름도 반입된 끝 커밋으로 옮기지
+    # 않는 체크아웃 HEAD를 기준으로 호환성을 판단해서는 안 된다.
         f"  'rev-parse origin/main') echo \"${{FAKE_GIT_UPSTREAM:-{SUPPORTED_SHA}}}\";;\n"
         "  'reset --hard '*) exit 0;;\n"
         "  'cat-file -e '*'{commit}')\n"
@@ -328,9 +327,8 @@ def fake_env(
         "  chmod +x \"$release/venv/bin/python\"\n"
         "  cp \"$FAKE_HERMES_EXECUTABLE\" \"$release/venv/bin/hermes\"\n"
         "  chmod +x \"$release/venv/bin/hermes\"\n"
-        # The faked build still has to leave what the producer leaves: an
-        # installed host is only usable when the release carries the real
-        # completion receipt the runtime gate validates.
+    # 모의 빌드도 생산자가 남기는 것을 그대로 남겨야 한다. 설치된 호스트는
+    # 릴리스에 런타임 게이트가 검증하는 실제 완료 영수증이 있어야만 사용할 수 있다.
         f"  PATH=/usr/bin:/bin {shlex.quote(sys.executable)} "
         f"{shlex.quote(str(receipt_helper))} \"$1\" \"$3\" \"$4\" \"$5\" || exit 1\n"
         "  printf '%s\\n' \"$release\"\n"
@@ -559,12 +557,11 @@ def test_setup_link_failure_does_not_install_broken_hook_settings(tmp_path: Path
 def test_setup_keeps_the_release_root_beside_a_denormalized_checkout(
     tmp_path: Path, suffix: str
 ) -> None:
-    """``$REPO.releases`` in shell and ``with_name`` in Python must agree.
+    """shell의 ``$REPO.releases``와 Python의 ``with_name``은 일치해야 한다.
 
-    A trailing separator makes plain concatenation name a hidden directory
-    *inside* the Hermes checkout while every Python caller keeps using the
-    sibling, so setup would install a launcher that reads a selector setup
-    never wrote.
+    후행 구분자가 있으면 단순 연결은 Hermes 체크아웃 *안의* 숨김 디렉터리를
+    가리키지만 모든 Python 호출자는 계속 형제 디렉터리를 사용한다. 그러면 setup은
+    자신이 쓰지 않은 선택자를 읽는 실행기를 설치하게 된다.
     """
     env, _log = fake_env(tmp_path)
     checkout = Path(env["HERMES_AGENT_REPO"])
@@ -640,7 +637,7 @@ def test_setup_rejects_traversal_in_the_hermes_checkout_before_writes(
     assert "HERMES_AGENT_REPO" in result.stderr
     assert not (tmp_path / ".local/bin/kanban-adapter").exists()
     assert not (tmp_path / ".local/bin/hermes").exists()
-    # The refusal lands before any release directory is constructed.
+    # 거부는 어떤 릴리스 디렉터리도 생성되기 전에 발생한다.
     assert not any(path.name.endswith(".releases") for path in tmp_path.iterdir())
 
 
@@ -2071,7 +2068,7 @@ def test_setup_preserves_foreign_hermes_launcher_successor_on_rollback(
 
 
 def crash_after_selector_replacement(tmp_path: Path) -> tuple[dict[str, str], Path]:
-    """Leave a stage operation receipt that no checkpoint ever consumed."""
+    """어떤 체크포인트도 소비하지 않은 스테이지 작업 영수증을 남긴다."""
     env, _log = fake_env(tmp_path)
     selector = Path(env["HERMES_AGENT_REPO"] + ".releases/current")
     crashing_env = dict(env)
@@ -2092,11 +2089,11 @@ def crash_after_selector_replacement(tmp_path: Path) -> tuple[dict[str, str], Pa
 def test_setup_recovers_crash_after_replace_without_interference(
     tmp_path: Path,
 ) -> None:
-    """The positive control for the foreign-successor recovery test.
+    """외부 후속 객체 복구 테스트의 양성 대조군.
 
-    A crash between ``replace-file`` and ``checkpoint`` leaves an operation
-    receipt the manifest does not yet manage. Nothing interfered with the host,
-    so the next setup has to roll that operation back and complete.
+    ``replace-file``과 ``checkpoint`` 사이의 충돌은 매니페스트가 아직 관리하지 않는
+    작업 영수증을 남긴다. 호스트를 방해한 것이 없으므로 다음 setup은 해당 작업을
+    롤백하고 완료해야 한다.
     """
     env, selector = crash_after_selector_replacement(tmp_path)
 
@@ -2113,11 +2110,11 @@ def test_setup_recovers_crash_after_replace_without_interference(
 def test_setup_recovery_rolls_back_the_uncheckpointed_operation(
     tmp_path: Path,
 ) -> None:
-    """Recovery must undo the operation, not merely tolerate its receipt."""
+    """복구는 영수증을 단순히 용인하지 말고 작업을 되돌려야 한다."""
     env, selector = crash_after_selector_replacement(tmp_path)
-    # Fail the rerun on the same leaf immediately after recovery, so the only
-    # way the selector can end up absent is that recovery restored the
-    # pre-crash baseline before this run snapshotted it.
+    # 복구 직후 동일한 리프에서 재실행을 실패시킨다. 따라서 선택자가 없어질 수 있는
+    # 유일한 경우는 이번 실행이 스냅샷을 찍기 전에 복구가 충돌 전 기준 상태를
+    # 복원한 경우뿐이다.
     failing_env = dict(env)
     failing_env["FAKE_PY_FAIL_REPLACE_TARGET"] = str(selector)
 
@@ -2144,8 +2141,8 @@ def test_setup_crash_recovery_preserves_foreign_selector_successor(
 
     assert recovered.returncode != 0
     assert selector.read_bytes() == foreign
-    # The refusal must name the substituted leaf and the identity that no
-    # longer matches the operation receipt, not any generic recovery fault.
+    # 거부 메시지는 일반적인 복구 오류가 아니라 교체된 리프와 작업 영수증에 더 이상
+    # 일치하지 않는 식별 정보를 명시해야 한다.
     assert "stale setup transaction" in recovered.stderr
     assert "operation identity no longer present" in recovered.stderr
     assert str(selector) in recovered.stderr
@@ -2286,7 +2283,7 @@ def launcher_backup(home: Path) -> Path:
 
 
 def install_with_original_launcher(tmp_path: Path) -> tuple[dict[str, str], bytes, bytes]:
-    """Install over an existing Hermes launcher and return the managed bytes."""
+    """기존 Hermes 실행기 위에 설치하고 관리되는 바이트를 반환한다."""
     env, _log = fake_env(tmp_path)
     launcher = tmp_path / ".local/bin/hermes"
     launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -2453,10 +2450,10 @@ def test_external_commands_do_not_inherit_transaction_authority(tmp_path: Path) 
         "fd9=closed fd10=closed dir=unset txfd=unset ledgerfd=unset" in line
         for line in scrubbed
     )
-    # Positive control: the same probe must observe the authority on the calls
-    # setup makes while still holding it, so a regression that stops scrubbing
-    # cannot pass silently. Board lookups run both before the transaction runner
-    # takes over and again inside it, so only the in-transaction ones see it.
+    # 양성 대조군: 동일한 검사는 setup이 권한을 아직 보유한 채 수행하는 호출에서 그
+    # 권한을 관찰해야 하므로, 권한 제거가 중단되는 회귀가 조용히 통과할 수 없다.
+    # 보드 조회는 트랜잭션 실행기가 인계받기 전과 내부에서 모두 실행되므로 트랜잭션
+    # 내부 조회에서만 권한이 보인다.
     assert any(
         "fd9=open fd10=open" in line and "txfd=9 ledgerfd=10" in line
         for line in retained

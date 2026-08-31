@@ -1,4 +1,4 @@
-"""Regression tests for the portable Hermes carried bundle."""
+"""이식 가능한 Hermes 반입 번들의 회귀 테스트."""
 
 from __future__ import annotations
 

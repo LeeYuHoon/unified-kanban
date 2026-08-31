@@ -147,7 +147,7 @@ MARKER = "usage-" + "0" * 32
 
 @dataclass
 class ShowRunner:
-    """Runner whose ``show --json`` returns a card with the given comments."""
+    """``show --json`` 호출 시 주어진 주석이 담긴 카드를 반환하는 실행기."""
 
     comments: list[str] = field(default_factory=list)
     calls: list[list[str]] = field(default_factory=list)
@@ -222,8 +222,8 @@ def test_done_completes_with_full_result_and_distinct_summary() -> None:
         summary="implemented",
     )
 
-    # The complete result is durable card content while the summary remains a
-    # bounded run handoff used for the default preview.
+    # 전체 결과는 카드에 영구 보존되는 내용이고, 요약은 기본 미리보기에 쓰이는
+    # 크기가 제한된 실행 인계 내용으로 남는다.
     assert runner.calls == [[
         "hermes", "kanban", "--board", "project-a", "complete",
         "--result=Full implementation details.",

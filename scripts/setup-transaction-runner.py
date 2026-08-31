@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run setup with a recoverable, single-writer filesystem transaction."""
+"""복구 가능하고 단일 작성자(single-writer)인 파일시스템 트랜잭션으로 setup을 실행한다."""
 
 from __future__ import annotations
 
@@ -161,10 +161,10 @@ def _prepare_transaction(
             os.environ["UNIFIED_KANBAN_TRANSACTION_FD"] = str(directory_fd)
             os.environ["UNIFIED_KANBAN_TOKEN_LEDGER_FD"] = str(ledger_fd)
             try:
-                # A stage receipt records one operation the manifest may never
-                # have checkpointed, so it is recovered against the manifest's
-                # ledger authority and never treated as a manifest receipt of
-                # its own. Later stages unwind first, then the manifest.
+                # stage 영수증은 매니페스트가 체크포인트하지 못했을 수도 있는
+                # 연산 하나를 기록하므로, 매니페스트의 ledger 권위를 기준으로
+                # 복구되며 결코 그 자체가 매니페스트 영수증으로 취급되지
+                # 않는다. 나중 stage부터 되감고, 그다음 매니페스트를 되감는다.
                 manifest = path / "manifest.json"
                 stages = sorted(
                     (

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a sealed, durable-overlay launchd plist for the managed Hermes gateway."""
+"""관리되는 Hermes 게이트웨이를 위한 봉인된 durable-overlay launchd plist를 렌더링한다."""
 
 from __future__ import annotations
 

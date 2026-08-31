@@ -24,10 +24,10 @@ def load_plugin(*, stub_compatibility: bool = True):
 def test_turns_are_enabled_for_the_selected_immutable_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewed_release
 ) -> None:
-    """Every Hermes turn must run when the reviewed release is selected.
+    """검토된 릴리스가 선택되면 모든 Hermes 턴이 실행되어야 한다.
 
-    Nothing moves the Hermes checkout onto the carried tip, so a gate that
-    demanded it would disable every turn on a correctly installed host.
+    Hermes 체크아웃을 반입된 끝 커밋으로 이동시키는 것은 없으므로 이를 요구하는
+    게이트는 올바르게 설치된 호스트의 모든 턴을 비활성화하게 된다.
     """
     pin = (REPO / "patches/hermes-agent-supported-upstream").read_text(
         encoding="utf-8"

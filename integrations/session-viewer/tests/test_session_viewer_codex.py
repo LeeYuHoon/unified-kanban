@@ -70,7 +70,7 @@ class CodexNormalizerTests(CodexBase):
         self.assertEqual(reasons.get("duplicate_response_item"), 1, reasons)
         self.assertEqual(reasons.get("developer_context"), 1, reasons)
         self.assertEqual(reasons.get("environment_context"), 1, reasons)
-        # the duplicated prompt text appears exactly once among real prompts
+        # 중복된 프롬프트 텍스트는 실제 프롬프트 중 정확히 한 번만 나타난다.
         texts = [p.text for p in csv_mod.real_prompts(self.session)]
         self.assertEqual(texts.count("Add a retry to the uploader."), 1)
 

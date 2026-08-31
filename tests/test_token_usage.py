@@ -23,8 +23,8 @@ def test_claude_snapshot_sums_api_calls_and_marks_reasoning_unavailable(tmp_path
             "cache_read_input_tokens": 7,
             "cache_creation_input_tokens": 11,
         }}},
-        # Claude writes multiple content-block rows for one API response. The
-        # repeated request usage must be counted once.
+    # Claude는 API 응답 하나에 여러 콘텐츠 블록 행을 기록한다. 반복된 요청 사용량은
+    # 한 번만 계산해야 한다.
         {"type": "assistant", "requestId": "req-1", "message": {"usage": {
             "input_tokens": 2,
             "output_tokens": 5,

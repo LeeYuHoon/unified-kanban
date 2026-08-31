@@ -453,7 +453,7 @@ def test_post_receipt_parent_close_failure_does_not_fail_operation(
 
 def test_post_tool_use_event_is_claude_only() -> None:
     assert installer.CLAUDE_EVENTS["PostToolUse"] == "post-tool-use"
-    # Codex 0.145 ships native PostToolUse/SubagentStart/SessionEnd hooks.
+    # Codex 0.145는 네이티브 PostToolUse/SubagentStart/SessionEnd 훅을 제공한다.
     assert installer.CODEX_EVENTS == {
         "UserPromptSubmit": "prompt",
         "PostToolUse": "post-tool-use",

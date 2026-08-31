@@ -56,7 +56,7 @@ class MarkdownRenderTests(unittest.TestCase):
 
     def test_prompt_with_fence_is_wrapped_in_longer_fence(self):
         self.assertIn("````", self.md)
-        # the inner fence survives intact
+        # 내부 펜스는 온전히 유지된다.
         self.assertIn("```python", self.md)
 
     def test_activity_is_summarised_not_expanded(self):
@@ -78,8 +78,8 @@ class MarkdownRenderTests(unittest.TestCase):
         self.assertIn("max_tokens", self.md)
 
     def test_prose_is_wrapped(self):
-        # Assistant prose is soft-wrapped; verbatim prompt blocks (inside fences)
-        # are left exactly as the human typed them.
+        # 어시스턴트 산문에는 유연한 줄바꿈을 적용하지만 펜스 안의 프롬프트 원문
+        # 블록은 사람이 입력한 그대로 둔다.
         session = _long_prose_session()
         md = csv_mod.render_markdown(session, raw=False, home=HOME, width=72)
         prose_lines = []

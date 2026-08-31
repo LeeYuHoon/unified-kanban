@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Render project-routing candidates from private transaction snapshots.
+"""전용 트랜잭션 스냅샷으로부터 프로젝트 라우팅 후보를 렌더링한다.
 
-This helper never mutates host configuration. The caller exports baseline bytes
-from the path transaction, invokes this renderer inside the private transaction
-directory, then commits candidates through path-transaction.py.
+이 헬퍼는 호스트 설정을 결코 변경하지 않는다. 호출자가 path 트랜잭션에서
+baseline 바이트를 내보내고, 전용 트랜잭션 디렉터리 안에서 이 렌더러를 호출한
+뒤, path-transaction.py를 통해 후보를 커밋한다.
 """
 
 from __future__ import annotations

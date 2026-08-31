@@ -1,8 +1,8 @@
-"""Synthetic Hermes Agent state.db fixtures.
+"""합성 Hermes Agent state.db 픽스처.
 
-Builds a throwaway SQLite database with the column shapes Hermes Agent 0.19
-uses in ``~/.hermes/state.db``. The real database is never opened by the test
-suite; every row here is hand-written.
+Hermes Agent 0.19가 ``~/.hermes/state.db``에서 사용하는 열 형태로 일회용 SQLite
+데이터베이스를 만든다. 테스트 모음은 실제 데이터베이스를 절대 열지 않으며 여기의
+모든 행은 직접 작성했다.
 """
 
 import os
@@ -129,7 +129,7 @@ def session_rows():
 
 def message_rows():
     return [
-        # --- session 101 ---
+        # --- 세션 101 ---
         _msg(1, 101, "system", "You are Hermes, an agent."),
         _msg(2, 101, "user", "Explain the retry policy."),
         _msg(3, 101, "user", INTERNAL_TEXT, display_kind="internal"),
@@ -152,9 +152,9 @@ def message_rows():
             finish_reason="stop",
             reasoning_content=REASONING_CONTENT_TEXT,
         ),
-        # rolled back -> never loaded
+                # 롤백됨 -> 절대 로드하지 않음
         _msg(7, 101, "user", INACTIVE_TEXT, active=0),
-        # explicit compaction boundary
+                # 명시적 압축 경계
         _msg(
             8,
             101,
@@ -168,7 +168,7 @@ def message_rows():
         _msg(12, 101, "assistant", "{not json at all", finish_reason="length"),
         _msg(13, 101, "user", HTML_PROMPT),
         _msg(14, 101, "assistant", "All done.", finish_reason="end_turn"),
-        # --- session 102 ---
+        # --- 세션 102 ---
         _msg(20, 102, "user", "Say hello in Korean.", timestamp="2026-07-04T09:00:01.000Z"),
         _msg(21, 102, "user", "hidden ui note", display_kind="hidden"),
         _msg(
@@ -184,7 +184,7 @@ def message_rows():
 
 
 def write_db(path):
-    """Create the synthetic state.db at ``path`` and return it."""
+    """``path``에 합성 state.db를 만들고 반환한다."""
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)

@@ -1,4 +1,4 @@
-"""Tests for immutable Hermes source release construction."""
+"""불변 Hermes 소스 릴리스 생성 테스트."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 METADATA_NAMESPACE = "contributors/emails/"
-# The byte-greatest literal path is the deterministic representative, so the
-# lowercase-"e" spelling is the one a normalized release must leave on disk.
+# 바이트 값이 가장 큰 리터럴 경로가 결정적 대표이므로, 정규화된 릴리스가 디스크에
+# 남겨야 하는 것은 소문자 "e" 표기다.
 REVIEWED_COLLISION = (
     ("100644", f"{METADATA_NAMESPACE}agent@Example-Host.local", "upper-side\n"),
     ("100644", f"{METADATA_NAMESPACE}agent@example-Host.local", "lower-side\n"),
@@ -101,7 +101,7 @@ def python_release(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def install_receiptable_launchers(release: Path) -> None:
-    """Install a real Python plus a harmless Hermes executable for receipt tests."""
+    """영수증 테스트를 위해 실제 Python과 무해한 Hermes 실행 파일을 설치한다."""
     bin_dir = release / "venv" / "bin"
     bin_dir.mkdir(parents=True)
     (bin_dir / "python").symlink_to(sys.executable)
@@ -113,7 +113,7 @@ def install_receiptable_launchers(release: Path) -> None:
 def build_incomplete_release(
     helper, tmp_path: Path, *, carried_entries: tuple[tuple[str, str, str], ...] = ()
 ) -> tuple[object, dict[str, object]]:
-    """Publish a release exactly as an interrupted dependency sync leaves it."""
+    """중단된 의존성 동기화가 남기는 그대로 릴리스를 게시한다."""
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
     source, bundle, upstream, carried = make_repositories(
@@ -164,19 +164,18 @@ def temporary_release_names(layout) -> list[str]:
 def make_repositories(
     tmp_path: Path, *, carried_entries: tuple[tuple[str, str, str], ...] = ()
 ) -> tuple[Path, Path, str, str]:
-    """Build a synthetic official source plus its reviewed carried bundle.
+    """합성 공식 소스와 검토된 반입 번들을 함께 빌드한다.
 
-    The carried commit is assembled in a private index rather than in the
-    worktree, so a test may place entries that a case-insensitive volume can
-    never materialize side by side without the fixture itself tripping over the
-    very collision it is trying to exercise.
+    반입된 커밋은 작업 트리가 아닌 비공개 인덱스에서 조립된다. 따라서 픽스처
+    자체가 검증하려는 충돌에 걸리지 않으면서, 대소문자를 구분하지 않는 볼륨에서는
+    절대 나란히 구체화할 수 없는 엔트리들을 테스트가 배치할 수 있다.
     """
     source = tmp_path / "synthetic-official"
     source.mkdir()
     subprocess.run(["git", "init", "-q", "--initial-branch=main"], cwd=source, check=True)
-    # macOS Git precomposes every path it is handed, so a decomposed tree entry
-    # can only be staged with that rewrite disabled. Upstream trees written on
-    # Linux carry decomposed paths verbatim, which is what this reproduces.
+    # macOS Git은 전달받은 모든 경로를 미리 조합하므로, 분해된 트리 엔트리는 해당
+    # 재작성을 비활성화해야만 스테이징할 수 있다. Linux에서 작성된 업스트림 트리는
+    # 분해된 경로를 그대로 담으며, 이 테스트는 그 상태를 재현한다.
     subprocess.run(
         ["git", "config", "--local", "core.precomposeunicode", "false"],
         cwd=source,
@@ -241,14 +240,13 @@ def make_repositories(
 def test_bundle_import_carries_its_own_file_transport_allowance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The persisted policy refuses the file transport; the bundle fetch must not.
+    """저장된 정책은 파일 전송을 거부하지만 번들 가져오기는 거부하면 안 된다.
 
-    Every real install and update builds with ``allow_local_source=False``, and
-    no other test in this file uses that value - all of them pass ``True``. A
-    persisted ``protocol.file.allow=never`` therefore looked safe while making
-    production release construction impossible: Git routes a bundle path through
-    the file transport, so the carried import died with ``transport 'file' not
-    allowed`` after the upstream fetch had already succeeded.
+    모든 실제 설치와 업데이트는 ``allow_local_source=False``로 빌드하며 이 파일의
+    다른 테스트는 모두 ``True``를 전달한다. 따라서 저장된
+    ``protocol.file.allow=never``는 안전해 보였지만 실제 릴리스 생성을 불가능하게
+    했다. Git은 번들 경로를 파일 전송으로 처리하므로 업스트림 가져오기가 이미
+    성공한 뒤 반입 과정이 ``transport 'file' not allowed`` 오류로 중단됐다.
     """
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
@@ -283,7 +281,7 @@ def test_bundle_import_carries_its_own_file_transport_allowance(
     assert bundle_fetch[0][: len(helper._FILE_TRANSPORT)] == helper._FILE_TRANSPORT
     assert bundle_fetch[0][len(helper._FILE_TRANSPORT)] == "fetch"
 
-    # The allowance is load-bearing: without it this exact fetch is refused.
+    # 이 허용 설정은 필수다. 없으면 바로 이 가져오기가 거부된다.
     work = tmp_path / "production-policy"
     work.mkdir()
     real_run_git(work, "init", "-q", "--initial-branch=main")
@@ -2558,8 +2556,8 @@ def test_managed_launcher_distinguishes_every_retained_baseline(tmp_path: Path) 
     bound = helper.launcher_payload(layout, "sha256:" + "a" * 64)
     rebound = helper.launcher_payload(layout, "sha256:" + "b" * 64)
 
-    # Uninstall proves provenance by re-rendering and comparing bytes, so every
-    # distinguishable install decision must produce a distinguishable launcher.
+    # 제거 과정은 다시 렌더링한 뒤 바이트를 비교해 출처를 입증하므로, 구별 가능한
+    # 모든 설치 결정은 구별 가능한 실행기를 만들어야 한다.
     assert len({absent, bound, rebound, helper.launcher_payload(other, helper.BASELINE_ABSENT)}) == 4
     assert absent == helper.launcher_payload(layout, helper.BASELINE_ABSENT)
     assert absent.startswith(b"#!/bin/sh\n# unified-kanban-hermes-baseline absent\n")
@@ -2682,7 +2680,7 @@ def test_precompile_bytecode_is_checked_hash_stable_and_runtime_immutable(
 def test_precompile_bytecode_ignores_manager_pycache_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Apple's manager Python must not relocate the release's expected pyc paths."""
+    """Apple의 관리자 Python은 릴리스가 기대하는 pyc 경로를 옮기면 안 된다."""
     helper = load_helper()
     release, source = python_release(tmp_path)
     external = tmp_path / "manager-pycache"
@@ -2699,7 +2697,7 @@ def test_precompile_bytecode_ignores_manager_pycache_prefix(
 def test_precompile_bytecode_uses_release_python_format(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Validation must not assume the manager and release use one pyc format."""
+    """검증은 관리자와 릴리스가 동일한 pyc 형식을 쓴다고 가정하면 안 된다."""
     helper = load_helper()
     release, _source = python_release(tmp_path)
     monkeypatch.setattr(helper.importlib.util, "MAGIC_NUMBER", b"\x00\x00\x00\x00")
@@ -2719,7 +2717,7 @@ def test_precompile_bytecode_fails_closed_on_invalid_source(tmp_path: Path) -> N
 
 
 def test_prepare_records_hermes_bytecode_fingerprint_before_receipt(tmp_path: Path) -> None:
-    """The first full Hermes launch must not sweep the sealed bytecode."""
+    """최초의 전체 Hermes 실행이 봉인된 바이트코드를 쓸어버리면 안 된다."""
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
@@ -3117,11 +3115,11 @@ def test_prepare_reuses_only_receipted_exact_release(tmp_path: Path) -> None:
 
 
 def test_prepare_rebuilds_after_an_interrupted_dependency_sync(tmp_path: Path) -> None:
-    """A receipt-less release must never brick every later run.
+    """영수증 없는 릴리스가 이후 모든 실행을 절대 망가뜨려서는 안 된다.
 
-    The first run publishes the stable release path and then loses its
-    dependency sync, so nothing can complete that release afterwards. The next
-    run has to retire it and rebuild instead of refusing forever.
+    첫 실행은 안정 릴리스 경로를 게시한 뒤 의존성 동기화에 실패하므로 이후에는
+    어떤 것도 그 릴리스를 완성할 수 없다. 다음 실행은 영원히 거부하는 대신 해당
+    릴리스를 폐기하고 다시 빌드해야 한다.
     """
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
@@ -3150,7 +3148,7 @@ def test_prepare_rebuilds_after_an_interrupted_dependency_sync(tmp_path: Path) -
     assert (layout.release / "venv" / "bin" / "hermes").is_file()
     assert layout.release.stat().st_ino != incomplete
     assert temporary_release_names(layout) == []
-    # The completed release is now reusable without touching uv at all.
+    # 이제 완성된 릴리스는 uv를 전혀 건드리지 않고 재사용할 수 있다.
     assert helper.prepare_release(
         layout, uv=fake_uv(tmp_path, "uv-unused", fails=True), **build
     ) == layout.release
@@ -3370,10 +3368,10 @@ def test_sync_rejects_relative_uv_and_scrubs_ambient_configuration(tmp_path: Pat
     ):
         assert forbidden not in observed
 
-    # `UV_NO_CONFIG` must not come back: it also discards the reviewed upstream's
-    # own `[tool.uv]` settings, and Hermes locks under a `[tool.uv] exclude-newer`
-    # span, so a no-config sync re-resolves and `--locked` refuses. User
-    # configuration is neutralised by an empty private directory instead.
+    # `UV_NO_CONFIG`를 다시 사용하면 안 된다. 이 변수는 검토된 업스트림 자체의
+    # `[tool.uv]` 설정도 버리며, Hermes는 `[tool.uv] exclude-newer` 범위 아래에서
+    # 잠그므로 설정 없는 동기화는 다시 해석되어 `--locked`가 거부한다. 대신 빈
+    # 비공개 디렉터리로 사용자 설정을 무력화한다.
     assert "UV_NO_CONFIG=" not in observed
     isolated = next(
         line.split("=", 1)[1]
@@ -3459,7 +3457,7 @@ def test_completion_receipt_fsync_failure_compensates(
 def prepare_synthetic_release(
     helper, tmp_path: Path, *, carried_entries: tuple[tuple[str, str, str], ...] = ()
 ):
-    """Prepare one completed release, faking only the dependency installer."""
+    """의존성 설치기만 모의 처리하여 완성된 릴리스 하나를 준비한다."""
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
     source, bundle, upstream, carried = make_repositories(
@@ -3484,12 +3482,12 @@ def collision_record(layout, helper) -> dict:
 
 
 def test_build_normalizes_the_reviewed_metadata_case_collision(tmp_path: Path) -> None:
-    """The one reviewed upstream collision must build, not fail the whole install.
+    """검토된 업스트림의 유일한 충돌은 빌드되어야 하며 전체 설치를 실패시키면 안 된다.
 
-    Upstream carries two contributor-email metadata files whose names differ only
-    by case. A supported case-insensitive volume can hold exactly one of them, so
-    the release has to name the survivor deterministically and prove its bytes
-    rather than either crashing or waving the resulting dirt through.
+    업스트림에는 이름의 대소문자만 다른 기여자 이메일 메타데이터 파일 두 개가
+    있다. 지원되는 대소문자 비구분 볼륨은 그중 하나만 담을 수 있으므로, 릴리스는
+    충돌하거나 그 결과로 생긴 변경을 무시해 통과시키는 대신 남길 파일을 결정적으로
+    정하고 그 바이트를 입증해야 한다.
     """
     helper = load_helper()
 
@@ -3583,7 +3581,7 @@ def test_build_normalizes_the_reviewed_metadata_case_collision(tmp_path: Path) -
 def test_build_refuses_a_case_collision_the_policy_does_not_allow(
     tmp_path: Path, entries: tuple[tuple[str, str, str], ...]
 ) -> None:
-    """Only the reviewed non-runtime metadata namespace may ever alias on disk."""
+    """검토된 비런타임 메타데이터 네임스페이스만 디스크에서 별칭 충돌할 수 있다."""
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
@@ -3605,7 +3603,7 @@ def test_build_refuses_a_case_collision_the_policy_does_not_allow(
 
 
 def test_build_normalizes_a_unicode_normalization_collision(tmp_path: Path) -> None:
-    """A supported volume folds NFD onto NFC, so the tree must be checked folded."""
+    """지원되는 볼륨은 NFD를 NFC로 접으므로 트리도 접은 형태로 검사해야 한다."""
     helper = load_helper()
     composed = unicodedata.normalize("NFC", f"{METADATA_NAMESPACE}café@example.invalid")
     decomposed = unicodedata.normalize("NFD", f"{METADATA_NAMESPACE}café@example.invalid")
@@ -3646,7 +3644,7 @@ def test_completed_release_rejects_tampering_with_the_normalized_collision(
 def test_completed_release_rejects_renaming_the_normalized_collision(
     tmp_path: Path,
 ) -> None:
-    """Swapping the survivor for the other spelling must not verify."""
+    """남은 파일을 다른 표기의 파일로 바꾸면 검증을 통과해서는 안 된다."""
     helper = load_helper()
     layout, build, release = prepare_synthetic_release(
         helper, tmp_path, carried_entries=REVIEWED_COLLISION
@@ -3678,7 +3676,7 @@ def test_normalized_release_is_reused_without_rebuilding(tmp_path: Path) -> None
 def test_incomplete_release_with_a_normalized_collision_is_still_retired(
     tmp_path: Path,
 ) -> None:
-    """Crash recovery must not read the reviewed collision as attacker damage."""
+    """충돌 복구는 검토된 충돌을 공격자가 만든 손상으로 해석하면 안 된다."""
     helper = load_helper()
     layout, build = build_incomplete_release(
         helper, tmp_path, carried_entries=REVIEWED_COLLISION
@@ -3707,12 +3705,12 @@ def test_incomplete_release_retirement_still_refuses_foreign_dirt(tmp_path: Path
 def test_case_sensitive_volume_materializes_every_collision_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A volume that keeps both members apart must keep both, and stay clean.
+    """두 구성원을 구분해 보존하는 볼륨은 둘 다 유지하면서 깨끗한 상태여야 한다.
 
-    The supported macOS volume folds every Unicode spelling this policy folds, so
-    the only way to drive the non-aliasing branch on real files here is to widen
-    the policy's equivalence for one synthetic pair. That is exactly the state a
-    case-sensitive volume presents: two distinct on-disk files for one group.
+    지원되는 macOS 볼륨은 이 정책이 접는 모든 Unicode 표기를 접는다. 따라서 실제
+    파일로 비별칭 분기를 실행하는 유일한 방법은 합성 쌍 하나에 대해 정책의 동등성
+    범위를 넓히는 것이다. 이는 대소문자 구분 볼륨이 나타내는 상태, 즉 한 그룹에
+    서로 다른 디스크 파일 두 개가 있는 상태와 정확히 같다.
     """
     helper = load_helper()
     real_key = helper._collision_key

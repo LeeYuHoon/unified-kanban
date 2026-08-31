@@ -1,4 +1,4 @@
-"""Exact Hermes upstream compatibility checks shared by installed entry points."""
+"""설치된 진입점들이 공유하는 Hermes upstream 정확 일치 호환성 검사."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ _MAX_RECEIPT_BYTES = 64 * 1024
 
 
 def _read_trusted_file(path: Path, *, max_bytes: int) -> str:
-    """Read one repository policy file without following or racing a link."""
+    """링크를 따라가거나 링크와 경쟁(race)하지 않고 저장소 정책 파일 하나를 읽는다."""
     before = os.lstat(path)
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
         raise ValueError(f"expected upstream file is not a trusted regular file: {path}")
@@ -50,7 +50,7 @@ def _read_trusted_file(path: Path, *, max_bytes: int) -> str:
 
 
 def read_supported_upstream(expected_file: Path | None = None) -> str:
-    """Read the repository pin without following links or accepting a swapped file."""
+    """링크를 따라가거나 바꿔치기된 파일을 받아들이지 않고 저장소 pin을 읽는다."""
     path = expected_file or _SUPPORTED_UPSTREAM_FILE
     expected = _read_trusted_file(path, max_bytes=256)
     if expected.endswith("\n"):
@@ -65,7 +65,7 @@ def read_supported_upstream(expected_file: Path | None = None) -> str:
 
 
 def read_carried_commits(carried_file: Path | None = None) -> tuple[str, ...]:
-    """Return the reviewed carried commit order from a trusted repository file."""
+    """신뢰된 저장소 파일에서 리뷰를 거친 carried commit 순서를 반환한다."""
     path = carried_file or _CARRIED_COMMITS_FILE
     commits: list[str] = []
     for line in _read_trusted_file(path, max_bytes=64 * 1024).splitlines():
@@ -81,7 +81,7 @@ def read_carried_commits(carried_file: Path | None = None) -> tuple[str, ...]:
 
 
 def _read_regular_bytes(path: Path, *, max_bytes: int, label: str) -> bytes:
-    """Read one managed file without following or racing a link."""
+    """링크를 따라가거나 링크와 경쟁하지 않고 관리 대상 파일 하나를 읽는다."""
     before = os.lstat(path)
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
         raise ValueError(f"{label} is not a regular file: {path}")
@@ -100,15 +100,15 @@ def _read_regular_bytes(path: Path, *, max_bytes: int, label: str) -> bytes:
 
 
 def check_selected_release(agent_repo: Path, upstream: str, carried: str) -> str:
-    """Return the refusal reason unless the selected release is the reviewed one.
+    """선택된 release가 리뷰된 것이 아니면 거부 사유를 반환한다.
 
-    The Hermes checkout is a read-only input whose ``HEAD`` no flow ever moves,
-    so what actually runs is the immutable release the selector names. This
-    validates that artifact: the exact expected release path, a real release
-    directory with an executable, and the producer's completion receipt bound
-    to that directory's identity. The receipt's full content inventory is not
-    recomputed here - hashing a whole venv on every Hermes turn is not viable -
-    which is the same validation boundary the managed launcher accepts.
+    Hermes checkout은 어떤 플로도 ``HEAD``를 옮기지 않는 읽기 전용 입력이므로,
+    실제로 실행되는 것은 selector가 가리키는 불변(immutable) release다. 이
+    함수는 그 산출물을 검증한다: 정확히 기대되는 release 경로, 실행 파일을
+    갖춘 실제 release 디렉터리, 그리고 그 디렉터리의 identity에 바인딩된
+    생산자의 completion receipt. receipt의 전체 콘텐츠 목록은 여기서 다시
+    계산하지 않는다 - 매 Hermes 턴마다 venv 전체를 해싱하는 것은 현실적이지
+    않다 - 이는 관리형 런처가 받아들이는 것과 동일한 검증 경계다.
     """
     selector = release_selector(agent_repo)
     expected_release = release_directory(agent_repo, carried)
@@ -174,7 +174,7 @@ def check_hermes_compatibility(
     hermes_version_output: str | None = None,
     runtime_prefix: Path | None = None,
 ) -> tuple[bool, str]:
-    """Fail closed unless the selected release and optional host runtime agree."""
+    """선택된 release와 선택적 호스트 런타임이 일치하지 않으면 fail closed 한다."""
     if agent_repo is None:
         configured_repo = os.environ.get("HERMES_AGENT_REPO")
         agent_repo = (
@@ -223,7 +223,7 @@ def check_hermes_compatibility(
 
 
 def main() -> int:
-    """Return zero only when the active Hermes checkout matches the reviewed pin."""
+    """활성 Hermes checkout이 리뷰된 pin과 일치할 때에만 0을 반환한다."""
     compatible, reason = check_hermes_compatibility()
     if compatible:
         return 0

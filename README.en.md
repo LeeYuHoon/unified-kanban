@@ -1,77 +1,133 @@
 # Unified Kanban
 
-[한국어 전체 문서](README.md)
+[한국어](README.md) | English
 
-Unified Kanban records real user turns from Hermes Agent, Claude Code, and Codex CLI as observation cards in one Hermes Kanban board. The implementation remains in this Git repository; setup installs managed symlinks and narrowly merged hook entries.
+Unified Kanban shows work from Hermes Agent, Claude Code, and Codex CLI in one Hermes Kanban board.
 
-## Why it is different
+> Only **macOS is supported** right now.
 
-- **One user prompt, one card** instead of one long card per session.
-- **One project route** derived from the Dashboard board's project directory—no per-project environment variables.
-- **Truthful telemetry** for Skills, subagents, MCP tools, model identifiers, and input/output/cache/reasoning token buckets. Missing provider data remains unknown rather than becoming zero.
-- **Readable results** with a concise summary and an expandable full response.
-- **Retry-safe observations** that do not enter the Hermes dispatcher queue.
-- **Repository-contained installation** with dry-run, idempotent merge, ownership-aware uninstall, and real smoke verification.
-- **Exact Hermes compatibility**: unsupported upstream revisions disable only this integration before it can write incorrect data; normal Hermes use remains available.
-- **No auxiliary clutter**: automatic delegation/background/compaction notifications and child-worker turns do not create duplicate cards.
+## What does it do?
 
-## Supported environment
+A card is created for each real user request. When the response finishes, the card stores the result and available usage details.
 
-The installation and real smoke flow are currently verified on macOS. On a genuinely empty per-user macOS host, setup can bootstrap the repository-pinned exact Hermes and required toolchain; an existing configured checkout remains supported. Windows and WSL2 are unsupported. Linux is not claimed as supported until a real-machine smoke is recorded.
+- See Hermes, Claude Code, and Codex work on one board.
+- Choose the right board from the current project folder.
+- Keep existing hooks and settings while adding only managed entries.
+- Skip duplicate cards for automatic notifications and internal helper work.
 
-## Quick start
+For implementation and security details, see the [implementation specification](docs/unified-kanban-spec.md) and [maintenance guide](docs/maintenance.md).
+
+## Install
+
+### Requirements
+
+- macOS
+- On a new Mac: Git, Bash, and `curl`. Setup prepares the remaining Hermes tools.
+- For an existing Hermes installation: Python 3.11+, Hermes CLI, Git, `uv`, Node, and `npm`
+- GitHub access to this repository
+
+This repository may be private. If clone reports `Repository not found`, check your repository access and GitHub login first.
+
+Keep the cloned folder in a permanent location. Installed links point to it.
+
+### New Mac
+
+If Hermes is not installed yet, do not run a separate Hermes installer first.
 
 ```bash
+cd "$HOME"
 git clone https://github.com/LeeYuHoon/unified-kanban.git
 cd unified-kanban
 ./scripts/setup.sh
 ```
 
-On an existing Hermes host, `./scripts/setup.sh --dry-run --no-restart --skip-smoke`
-previews integration changes. A genuinely empty host intentionally rejects dry-run because dry-run
-will not bootstrap; run the real setup shown above.
-
-Do not preinstall absent Hermes through a moving installer URL. On a genuinely empty macOS host,
-`setup.sh` verifies the frozen installer bytes and exact official commit before bootstrap. Existing,
-foreign, Desktop-managed, newer, dirty, or partial Hermes installations are preserved or rejected
-fail closed rather than reset or downgraded.
-
-A fresh non-interactive bootstrap does not create credentials or a board. On a receipt-managed
-bootstrap host, normal setup conservatively reports `authenticated smoke deferred` rather than inferring
-credential or board readiness; explicit `--skip-smoke` suppresses both smoke and that guidance. Complete `hermes setup`, create `unified-kanban-smoke`, then run
-`./scripts/kanban-smoke.sh` explicitly. If managed activation fails after plain bootstrap, rerun the same
-`setup.sh`: it authenticates and reuses the bootstrap receipt instead of running the installer again.
-Pre-bootstrap path normalization does not depend on ambient Python, and absent checkout/data/release ancestry is validated before private temporary creation or download. The `before installer` phase validates the full ancestry and leaf authority of the root-owned macOS `system Perl`. Incomplete receipt bytes remain in a `staging-only` namespace and are atomically armed into the recoverable candidate namespace only after durable write completion, so every failure after installer execution retains retry authority while pre-arm crash debris is safely discarded. Any root-equivalent spelling of `HERMES_AGENT_REPO` or `HERMES_HOME` is rejected as the `filesystem root` before bootstrap writes. The frozen installer's `venv/bin/python` `absolute symlink` is read as `raw symlink target bytes` through the validated system Perl and confined to the managed runtime, then both its symlink identity and the resolved target's complete ancestry, leaf, and stable identity are authenticated. Before publishing or reusing that receipt, bootstrap executes the managed Python 3.11+ and managed Node 26 binaries at their fixed paths after validating every intermediate ancestry component and the managed uv parent. It `fsync`s the receipt file and state directory, and also `fsync`s each containing parent when creating a bootstrap-state or release-root directory entry; retries re-`fsync` the containing parent of every existing private component to repair incomplete durability. If a crash leaves only the pre-publication private candidate, or leaves it beside the canonical same-inode receipt, normal setup detects that candidate authority and invokes status recovery. Recovery authenticates the exact bytes and identity/toolchain and `fsync`s the candidate file before durably resuming publication or cleanup. An existing release root is validated before its containing-parent `fsync`, and the managed launcher proves it read the selector's complete stable bytes. Setup and the managed launcher fail closed if checkout, release-root, or data-home ancestry from `/` contains a symlink, foreign owner, or group/other writable ancestor, or if a managed selector/executable leaf has an unsafe owner, mode, or link count.
-Running setup twice selects the same exact release and does not duplicate managed entries.
-
-The setup command refuses to modify host configuration unless the frozen official SHA,
-repository pin, and carried stack agree. Release construction fetches that exact reviewed SHA from
-the fixed official HTTPS repository; a later move of `main` is handled by the next maintenance cycle.
-The Hermes checkout is never mutated, so
-runtime entry points do not look at its `HEAD`; they require the release selector to name exactly
-`<HERMES_AGENT_REPO>.releases/release-<final carried commit>` and that release to carry the
-producer's completion receipt for its own directory identity. The wheel is
-a library/build artifact and intentionally exposes no mutation console script; supported deployment
-uses `scripts/setup.sh`, and direct module CLI execution fails closed without repository policy files.
-Setup and smoke never auto-create boards because Hermes does not expose a conditional
-creation receipt that can prove rollback ownership. Create the smoke board first; likewise,
-`--project-dir ... --board SLUG` requires an existing board.
-See the Korean README for complete prerequisites, troubleshooting, Dashboard setup, update behavior,
-and uninstall instructions.
-
-## Development
+Then configure Hermes and create the smoke-test board:
 
 ```bash
-uv sync --frozen --group dev
-uv run pytest -o addopts='' -q
+export PATH="$HOME/.local/bin:$PATH"
+hermes setup
+hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
+./scripts/kanban-smoke.sh
 ```
 
-- [Architecture and project structure](docs/project-structure.md)
-- [Maintenance and release process](docs/maintenance.md)
-- [Hermes update checklist](docs/hermes-update-checklist.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
-- [Changelog](CHANGELOG.md)
-- [Third-party notices](THIRD_PARTY_NOTICES.md)
+The smoke test creates, updates, completes, and archives a temporary card.
 
-Licensed under the [MIT License](LICENSE).
+### Existing Hermes user
+
+Setup does not reset or edit your existing Hermes source folder. It also preserves your configuration, authentication, boards, and cards. Setup builds a separate verified Hermes copy and switches the managed launcher to it. It adds only the managed Hermes configuration needed to enable the Unified Kanban plugin.
+
+Preview the changes, then install:
+
+```bash
+./scripts/setup.sh --dry-run --no-restart --skip-smoke
+./scripts/setup.sh
+```
+
+If your Hermes source folder is not in the default location, provide its absolute path:
+
+```bash
+HERMES_AGENT_REPO="/absolute/path/to/hermes-agent" ./scripts/setup.sh
+```
+
+If a managed link or service conflicts with another installation, the managed state is incomplete, or file permissions are unsafe, setup stops without overwriting it. Do not delete or reinstall Hermes to hide the error; read the error first.
+
+Quit and reopen any Hermes CLI/TUI/Desktop, Claude Code, and Codex CLI processes that were running before installation.
+
+## Use
+
+Open the Dashboard:
+
+```bash
+hermes dashboard
+```
+
+1. Open **Kanban** and create or select a board.
+2. Set **Project directory** to the absolute path of the project you work in.
+3. Run Hermes, Claude Code, or Codex in that folder or one of its subfolders.
+
+Each real user request should now create a card and save the result when the work finishes. The final response is stored on the card, so do not include passwords, API keys, or other sensitive information in requests or responses.
+
+Check the installation with:
+
+```bash
+command -v kanban-adapter
+hermes kanban boards list --json
+./scripts/kanban-smoke.sh
+```
+
+### Update
+
+```bash
+cd "$HOME/unified-kanban"  # Replace with your clone location.
+git pull --ff-only
+./scripts/update-hermes-if-needed.sh
+./scripts/setup.sh
+```
+
+Updates preserve the existing Hermes checkout, user configuration, authentication, boards, and cards.
+
+### Troubleshooting
+
+| Symptom | What to do |
+| --- | --- |
+| `Repository not found` | Check GitHub authentication and repository access. |
+| `hermes: command not found` | Open a new terminal or run `export PATH="$HOME/.local/bin:$PATH"`. |
+| `Hermes Agent checkout not found` | On a new Mac, run the real `./scripts/setup.sh` instead of dry-run. For an existing installation, set an absolute `HERMES_AGENT_REPO`. |
+| `Hermes version mismatch` | Run the update script, then run setup again. |
+| `Refusing foreign ...` | Do not delete files blindly. If they came from an older checkout, run its uninstall script first. |
+| Smoke test fails | Run `hermes doctor`, list boards, then rerun `./scripts/kanban-smoke.sh`. |
+
+Keep the original error message and consult the [Hermes update checklist](docs/hermes-update-checklist.md) if the problem continues.
+
+## Uninstall
+
+Remove only the links and integration entries managed by Unified Kanban:
+
+```bash
+cd "$HOME/unified-kanban"  # Replace with your clone location.
+./scripts/uninstall.sh
+```
+
+Uninstall keeps your existing Hermes checkout, configuration, authentication, boards, and cards. It also keeps a small amount of state used for safe reinstall and troubleshooting.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and [SECURITY.md](SECURITY.md) for private security reports.

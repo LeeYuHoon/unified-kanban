@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build immutable Hermes source releases without mutating the source checkout."""
+"""소스 체크아웃을 변경하지 않고 불변(immutable) Hermes 소스 릴리스를 빌드한다."""
 
 from __future__ import annotations
 
@@ -47,32 +47,33 @@ BASELINE_ABSENT = "absent"
 _BASELINE_RE = re.compile(r"absent|sha256:[0-9a-f]{64}")
 _BASELINE_MARKER = "# unified-kanban-hermes-baseline"
 
-# The supported platform is macOS, whose default volume compares filenames after
-# Unicode normalization *and* full case folding. Two reviewed source paths that
-# fold together therefore cannot both exist in the release worktree: one silently
-# aliases the other, the checkout looks dirty, and every build fails closed.
+# 지원 플랫폼은 macOS이며, 그 기본 볼륨은 파일 이름을 Unicode 정규화 *및*
+# 완전한 케이스 폴딩(case folding)까지 거친 뒤에 비교한다. 따라서 서로 폴딩되어
+# 겹치는 두 개의 검토된 소스 경로는 릴리스 워크트리에 동시에 존재할 수 없다:
+# 한쪽이 다른 쪽의 별칭이 되어 조용히 가려 버리고, 체크아웃은 더러워 보이며,
+# 모든 빌드는 fail-closed로 실패한다.
 #
-# Exactly one upstream namespace is permitted to fold, and only because it is
-# pure release-time metadata: `contributors/emails/<commit-author-email>` maps a
-# commit-author address to a GitHub login for upstream's own attribution CI. It
-# is never imported, never executed, never read by the Hermes runtime, and never
-# an input to dependency resolution or configuration. Nothing else may fold -
-# an aliased module, lockfile, config, or executable would silently change what
-# the release runs, so those stay a hard build failure.
+# 정확히 하나의 업스트림 네임스페이스만 폴딩이 허용되며, 그것도 순수한
+# 릴리스 시점 메타데이터이기 때문이다: `contributors/emails/<commit-author-email>`은
+# 업스트림 자체의 저작자 표기(attribution) CI를 위해 커밋 작성자 주소를 GitHub
+# 로그인으로 매핑한다. 이는 결코 import되지 않고, 실행되지 않으며, Hermes 런타임이
+# 읽지도 않고, 의존성 해석이나 설정의 입력이 되지도 않는다. 그 밖의 어떤 것도
+# 폴딩되어서는 안 된다 - 별칭이 된 모듈, lockfile, 설정 파일, 실행 파일은 릴리스가
+# 실행하는 내용을 조용히 바꿔 버리므로, 그런 경우는 빌드의 하드 실패로 유지된다.
 METADATA_COLLISION_NAMESPACES = ("contributors/emails/",)
 _PLAIN_FILE_MODE = "100644"
 _DIRECTORY_MODE = "040000"
-# Scoped, single-command permission for the only two file-transport reads a
-# build may perform: the private bundle copy, and a test-only local source.
+# 빌드가 수행할 수 있는 단 두 가지 file 전송(file-transport) 읽기 - 비공개 번들
+# 사본과 테스트 전용 로컬 소스 - 에만 부여되는, 단일 명령 범위의 허가.
 _FILE_TRANSPORT = ("-c", "protocol.file.allow=always")
 
 
 class ForeignLauncher(RuntimeError):
-    """Raised when a launcher is not exactly the managed launcher."""
+    """launcher가 정확히 관리되는 launcher가 아닐 때 발생한다."""
 
 
 class CaseCollision(NamedTuple):
-    """One reviewed group of source paths a supported volume folds together."""
+    """지원 볼륨이 하나로 폴딩하는, 검토된 소스 경로들의 그룹 하나."""
 
     key: str
     representative: str
@@ -94,9 +95,9 @@ def _sha(value: str, label: str) -> str:
 def release_layout(agent_repo: Path, upstream: str, carried: str) -> ReleaseLayout:
     _sha(upstream, "upstream")
     _sha(carried, "carried")
-    # The shared normal form is what shell callers concatenate ".releases" onto,
-    # so a trailing slash or a "/./" component can never place the release root
-    # inside the checkout for one caller and beside it for another.
+    # 이 공유 정규형(normal form)은 셸 호출자들이 ".releases"를 이어 붙이는 대상이므로,
+    # 끝에 붙은 슬래시나 "/./" 구성 요소 때문에 릴리스 루트가 어떤 호출자에게는
+    # 체크아웃 내부에, 다른 호출자에게는 그 옆에 놓이는 일이 결코 생길 수 없다.
     return ReleaseLayout(
         release_root(agent_repo),
         release_directory(agent_repo, carried),
@@ -105,9 +106,9 @@ def release_layout(agent_repo: Path, upstream: str, carried: str) -> ReleaseLayo
 
 
 def _safe_git_env() -> dict[str, str]:
-    # Release construction runs inside the setup transaction, so the ambient
-    # environment still names the private transaction directory and its
-    # descriptor numbers. Git is an external command and gets none of it.
+    # 릴리스 구성은 setup 트랜잭션 내부에서 실행되므로, 주변 환경에는 여전히
+    # 비공개 트랜잭션 디렉터리와 그 디스크립터 번호가 이름으로 남아 있다.
+    # Git은 외부 명령이므로 그중 어느 것도 넘겨받지 않는다.
     env = {
         key: value
         for key, value in os.environ.items()
@@ -128,7 +129,7 @@ def _safe_git_env() -> dict[str, str]:
 
 
 def _run_git_binary(repository: Path, *arguments: str) -> bytes:
-    """Run Git for output that must stay bytes: blobs and NUL-delimited paths."""
+    """바이트로 유지되어야 하는 출력(blob과 NUL로 구분된 경로)을 위해 Git을 실행한다."""
     completed = subprocess.run(
         [TRUSTED_GIT, "-C", str(repository), *arguments],
         env=_safe_git_env(),
@@ -164,7 +165,7 @@ def _run_git(repository: Path, *arguments: str) -> str:
 
 
 def _porcelain_status(repository: Path) -> list[str]:
-    """Return NUL-delimited status records, so no path is ever shell-quoted."""
+    """어떤 경로도 셸 인용을 거치지 않도록 NUL로 구분된 status 레코드를 반환한다."""
     raw = _run_git_binary(
         repository, "-c", "core.fsmonitor=false", "status", "--porcelain", "-z"
     )
@@ -172,7 +173,7 @@ def _porcelain_status(repository: Path) -> list[str]:
 
 
 def _porcelain_status_all(repository: Path) -> list[str]:
-    """Return every untracked file rather than collapsing owned output directories."""
+    """소유한 출력 디렉터리를 접어 합치는 대신 모든 미추적 파일을 반환한다."""
     raw = _run_git_binary(
         repository,
         "-c",
@@ -186,12 +187,12 @@ def _porcelain_status_all(repository: Path) -> list[str]:
 
 
 def _collision_key(path: str) -> str:
-    """Return the normal form a supported volume compares two paths by."""
+    """지원 볼륨이 두 경로를 비교할 때 사용하는 정규형을 반환한다."""
     return unicodedata.normalize("NFC", path).casefold()
 
 
 def _checked_case_collision(key: str, members: tuple[tuple[str, str, str], ...]) -> CaseCollision:
-    """Admit one folded group only under the reviewed metadata policy."""
+    """검토된 메타데이터 정책 아래에서만 폴딩된 그룹 하나를 허용한다."""
     for path, mode, oid in members:
         namespace = next(
             (name for name in METADATA_COLLISION_NAMESPACES if path.startswith(name)), None
@@ -210,20 +211,20 @@ def _checked_case_collision(key: str, members: tuple[tuple[str, str, str], ...])
             raise RuntimeError(f"case-fold collision member has no reviewed blob: {path}")
     if len({path.rsplit("/", 1)[0] for path, _, _ in members}) != 1:
         raise RuntimeError(f"case-fold collision spans more than one directory: {key}")
-    # Git checks the index out in path-byte order, so the byte-greatest member is
-    # the one a supported volume is left holding. Selecting it explicitly makes
-    # the survivor a reviewed decision instead of a checkout-order side effect.
+    # Git은 인덱스를 경로 바이트 순서로 체크아웃하므로, 바이트 값이 가장 큰 멤버가
+    # 지원 볼륨에 최종적으로 남는 멤버다. 그것을 명시적으로 선택함으로써 생존자는
+    # 체크아웃 순서의 부수 효과가 아니라 검토된 결정이 된다.
     representative = max(members, key=lambda member: os.fsencode(member[0]))[0]
     return CaseCollision(key=key, representative=representative, members=members)
 
 
 def case_collisions(repository: Path, treeish: str) -> tuple[CaseCollision, ...]:
-    """Return the folded path groups of one exact Git tree, or fail closed.
+    """정확히 하나의 Git 트리에서 폴딩되는 경로 그룹들을 반환하거나, fail-closed로 실패한다.
 
-    Detection reads the tree rather than the volume, so the same reviewed source
-    yields the same verdict on every filesystem. Ancestor directories are folded
-    too: a directory that aliases another merges its children on a supported
-    volume just as surely as two aliased files do.
+    감지는 볼륨이 아니라 트리를 읽으므로, 같은 검토된 소스는 어떤 파일시스템에서든
+    같은 판정을 낳는다. 조상 디렉터리도 함께 폴딩된다: 다른 디렉터리의 별칭이 되는
+    디렉터리는, 별칭이 된 두 파일이 그렇듯이 지원 볼륨에서 자신의 자식들을
+    확실하게 병합해 버린다.
     """
     listing = _run_git_binary(repository, "ls-tree", "-r", "-z", "--full-tree", treeish)
     groups: dict[str, dict[str, tuple[str, str]]] = {}
@@ -262,7 +263,7 @@ def case_collisions(repository: Path, treeish: str) -> tuple[CaseCollision, ...]
 
 
 def _collision_slot(worktree: Path, directory: str, key: str) -> list[str]:
-    """Return every on-disk name in one directory that folds onto ``key``."""
+    """한 디렉터리 안에서 ``key``로 폴딩되는 디스크상의 모든 이름을 반환한다."""
     occupied = []
     try:
         with os.scandir(worktree / directory) as entries:
@@ -283,11 +284,11 @@ def _collision_slot(worktree: Path, directory: str, key: str) -> list[str]:
 
 
 def _rewrite_collision_representative(worktree: Path, occupant: str, representative: str, data: bytes) -> None:
-    """Replace whatever the checkout left aliased with the reviewed survivor.
+    """체크아웃이 별칭 상태로 남겨 놓은 것을 검토된 생존자로 교체한다.
 
-    Unlinking first is what makes the surviving *name* deterministic: writing
-    through the alias would keep whichever spelling the checkout happened to
-    create, so the release inventory would depend on Git's write order.
+    먼저 unlink하는 것이 살아남는 *이름*을 결정적으로 만든다: 별칭을 통해
+    그대로 쓰면 체크아웃이 우연히 만들어 낸 철자가 유지되어, 릴리스 인벤토리가
+    Git의 쓰기 순서에 의존하게 되기 때문이다.
     """
     os.unlink(worktree / occupant)
     descriptor = os.open(
@@ -312,12 +313,12 @@ def _rewrite_collision_representative(worktree: Path, occupant: str, representat
 def _materialized_case_collisions(
     worktree: Path, collisions: tuple[CaseCollision, ...], *, rewrite: bool
 ) -> list[dict[str, object]]:
-    """Prove what one exact folded group actually became on this volume.
+    """정확히 하나의 폴딩된 그룹이 이 볼륨에서 실제로 무엇이 되었는지 증명한다.
 
-    ``rewrite`` is the single build-time pass that pins the survivor. Every later
-    call observes only, so a completed release re-derives the identical record
-    and any drift - edited bytes, a swapped spelling, a resurrected member -
-    fails the reuse verification instead of being repaired in place.
+    ``rewrite``는 생존자를 고정하는 단 한 번의 빌드 시점 패스다. 이후의 모든
+    호출은 관찰만 하므로, 완성된 릴리스는 동일한 레코드를 다시 도출하고,
+    어떤 드리프트든 - 편집된 바이트, 뒤바뀐 철자, 되살아난 멤버 - 제자리에서
+    수리되는 대신 재사용 검증을 실패시킨다.
     """
     records: list[dict[str, object]] = []
     for collision in collisions:
@@ -344,8 +345,8 @@ def _materialized_case_collisions(
                 )
             materialized = [collision.representative]
         elif occupied == sorted(members, key=os.fsencode):
-            # A volume that keeps the members apart loses nothing, so every
-            # member stays and the whole group is still bound to the receipt.
+            # 멤버들을 서로 분리해 두는 볼륨에서는 잃는 것이 없으므로, 모든
+            # 멤버가 그대로 남고 그룹 전체는 여전히 영수증에 결속된다.
             materialized = occupied
         else:
             raise RuntimeError(
@@ -373,11 +374,11 @@ def _materialized_case_collisions(
 def _expected_collision_status(
     collisions: tuple[CaseCollision, ...], records: list[dict[str, object]]
 ) -> set[str]:
-    """Return the exact status records a normalized release is allowed to show.
+    """정규화된 릴리스가 보여도 되는 정확한 status 레코드들을 반환한다.
 
-    A member that lost its slot still has an index entry, so Git reports it as
-    modified against the survivor's bytes. That single predicted record is what
-    a build may see - never a blanket tolerance for a dirty worktree.
+    슬롯을 잃은 멤버도 인덱스 항목은 여전히 갖고 있으므로, Git은 이를 생존자의
+    바이트와 비교해 수정된 것으로 보고한다. 빌드가 볼 수 있는 것은 그렇게 예측된
+    단 하나의 레코드뿐이며 - 더러운 워크트리에 대한 포괄적 허용은 결코 아니다.
     """
     expected: set[str] = set()
     for collision, record in zip(collisions, records):
@@ -462,7 +463,7 @@ def _rename_exclusive_at(directory_fd: int, source: str, destination: str) -> No
 
 
 def release_reference_payload(root: Path, release: Path) -> bytes:
-    """Return one canonical release reference suitable for durable publication."""
+    """내구성 있는 게시(publication)에 적합한 정규 릴리스 참조 하나를 반환한다."""
     if (
         not release.is_absolute()
         or release.parent != root
@@ -473,20 +474,19 @@ def release_reference_payload(root: Path, release: Path) -> bytes:
 
 
 def selector_payload(layout: ReleaseLayout) -> bytes:
-    """Return the regular-file selector payload for path-transaction publication."""
+    """경로 트랜잭션 게시에 사용할 일반 파일 selector 페이로드를 반환한다."""
     if not layout.release.is_dir() or layout.release.is_symlink():
         raise RuntimeError("release must be a real directory before selection")
     return release_reference_payload(layout.root, layout.release)
 
 
 def baseline_token(path: Path | None) -> str:
-    """Return the producer-issued binding for the launcher this install replaces.
+    """이 설치가 교체하는 launcher에 대해 생산자가 발급한 바인딩을 반환한다.
 
-    The token is embedded in the managed launcher at install time, so uninstall
-    can prove the retained backup it is about to restore is the exact byte
-    sequence the installer displaced. A foreign replacement, an injection where
-    no original existed, or a deletion of the retained backup all change the
-    token and therefore stop matching the installed launcher.
+    이 토큰은 설치 시점에 관리되는 launcher에 내장되므로, uninstall은 곧 복원하려는
+    보존 백업이 설치 프로그램이 밀어냈던 것과 정확히 같은 바이트 시퀀스임을
+    증명할 수 있다. 외부의 교체본, 원본이 없던 자리에 대한 주입, 보존 백업의
+    삭제는 모두 토큰을 바꾸므로 설치된 launcher와의 일치가 더 이상 성립하지 않는다.
     """
     if path is None:
         return BASELINE_ABSENT
@@ -494,7 +494,7 @@ def baseline_token(path: Path | None) -> str:
 
 
 def launcher_payload(layout: ReleaseLayout, baseline: str) -> bytes:
-    """Render a managed launcher that validates the regular release selector."""
+    """일반 파일 릴리스 selector를 검증하는 관리되는 launcher를 렌더링한다."""
     if _BASELINE_RE.fullmatch(baseline) is None:
         raise ValueError("launcher baseline must be 'absent' or 'sha256:<64 hex>'")
     code = r'''import os,re,stat,sys
@@ -595,12 +595,12 @@ os.execv(executable,[executable,*sys.argv[3:]])'''
 
 
 def launcher_baseline(layout: ReleaseLayout, data: bytes) -> str:
-    """Return the binding of an exactly-managed launcher, else raise.
+    """정확히 관리되는 launcher의 바인딩을 반환하고, 그렇지 않으면 예외를 던진다.
 
-    Only the producer can state which launcher it displaced, so the binding is
-    trusted solely when re-rendering it reproduces the candidate byte for byte.
-    That makes every foreign body, every truncation or extension, and every
-    malformed token a rejection rather than an adopted claim.
+    자신이 어떤 launcher를 밀어냈는지는 생산자만이 말할 수 있으므로, 바인딩은
+    그것을 다시 렌더링했을 때 후보를 바이트 단위로 그대로 재현하는 경우에만
+    신뢰된다. 그 덕분에 모든 외부의 본문, 모든 절단이나 덧붙임, 형식이 잘못된
+    모든 토큰은 받아들여지는 주장이 아니라 거부가 된다.
     """
     lines = data.split(b"\n")
     if len(lines) < 2 or not lines[1].startswith(_BASELINE_MARKER.encode() + b" "):
@@ -623,7 +623,7 @@ def sync_release_dependencies(
     base_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> Path:
-    """Create and lock-sync a release-local venv at its stable final path."""
+    """안정된 최종 경로에 릴리스 로컬 venv를 생성하고 lock 기반으로 동기화한다."""
     release = Path(release)
     if not release.is_absolute() or not re.fullmatch(r"release-[0-9a-f]{40}", release.name):
         raise ValueError("release must be an absolute stable release path")
@@ -675,30 +675,30 @@ def sync_release_dependencies(
         if (after_uv.st_dev, after_uv.st_ino) != uv_identity:
             raise RuntimeError("uv executable identity changed during dependency construction")
         if completed.returncode != 0:
-            # uv opens with progress and advisory lines and puts the decisive
-            # error last, so reporting the first line hid a locked-sync refusal
-            # behind an informational note about resolution.
+            # uv는 진행 상황과 안내 줄로 출력을 시작하고 결정적인 오류를 맨
+            # 마지막에 두므로, 첫 줄만 보고하면 lock 동기화 거부가 해석(resolution)에
+            # 관한 정보성 안내 뒤에 숨어 버렸다.
             detail = [line for line in completed.stderr.strip().splitlines() if line.strip()]
             raise RuntimeError(
                 f"uv {' '.join(arguments)} failed: {detail[-1] if detail else completed.returncode}"
             )
 
-    # `UV_NO_CONFIG` would also discard the *reviewed* project's own `[tool.uv]`
-    # settings. Hermes locks under a `[tool.uv] exclude-newer` span, so dropping
-    # that setting makes uv re-resolve and `--locked` refuse - every production
-    # release build failed there. Point uv's user configuration directory at an
-    # empty private one instead. The reviewed pyproject still applies, and the
-    # invoking user's `~/.config/uv/uv.toml` cannot reach this build: project
-    # configuration already takes precedence over it, and for an upstream that
-    # carries no `[tool.uv]` of its own there is now nothing to inherit.
+    # `UV_NO_CONFIG`는 *검토된* 프로젝트 자체의 `[tool.uv]` 설정까지 함께 버리게
+    # 된다. Hermes는 `[tool.uv] exclude-newer` 구간 아래에서 lock을 만들므로, 그
+    # 설정이 사라지면 uv가 다시 해석(re-resolve)하고 `--locked`가 거부한다 - 모든
+    # 프로덕션 릴리스 빌드가 거기서 실패했다. 대신 uv의 사용자 설정 디렉터리를
+    # 비어 있는 비공개 디렉터리로 향하게 한다. 검토된 pyproject는 여전히 적용되고,
+    # 호출한 사용자의 `~/.config/uv/uv.toml`은 이 빌드에 닿을 수 없다: 프로젝트
+    # 설정이 이미 그것보다 우선하며, 자체 `[tool.uv]`를 지니지 않은 업스트림이라면
+    # 이제 물려받을 것이 아무것도 없다.
     with tempfile.TemporaryDirectory(prefix="unified-kanban-uv-config-") as isolated_config:
         os.chmod(isolated_config, 0o700)
         env["XDG_CONFIG_HOME"] = isolated_config
         run("venv", str(venv), "--python", "3.11")
         env["UV_PYTHON"] = str(venv / "bin" / "python")
-        # The production gateway may enable Telegram before any interactive
-        # process exists. Materialize the lockfile-pinned messaging set before
-        # sealing so gateway startup never writes it into the immutable venv.
+        # 프로덕션 게이트웨이는 어떤 대화형 프로세스가 존재하기도 전에 Telegram을
+        # 활성화할 수 있다. 게이트웨이 시작이 불변 venv에 그것을 써 넣는 일이 결코
+        # 없도록, 봉인 전에 lockfile로 고정된 메시징 집합을 실체화한다.
         run("sync", "--extra", "all", "--extra", "messaging", "--locked")
     launcher = venv / "bin" / "hermes"
     if not launcher.is_file() or launcher.is_symlink() or not os.access(launcher, os.X_OK):
@@ -714,7 +714,7 @@ def build_release_web_ui(
     base_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> Path:
-    """Build the dashboard before the immutable release receipt is sealed."""
+    """불변 릴리스 영수증이 봉인되기 전에 대시보드를 빌드한다."""
     release = Path(release)
     if not release.is_absolute() or not re.fullmatch(r"release-[0-9a-f]{40}", release.name):
         raise ValueError("release must be an absolute stable release path")
@@ -787,9 +787,9 @@ def build_release_web_ui(
     output_info = os.lstat(output)
     if not stat.S_ISREG(output_info.st_mode) or output_info.st_nlink != 1:
         raise RuntimeError("web build did not create a stable dashboard index")
-    # npm's content-addressed staging may use hard links. Runtime only needs the
-    # reviewed web_dist output, so remove build dependencies before the release
-    # inventory is sealed rather than weakening the single-link invariant.
+    # npm의 콘텐츠 주소 기반 스테이징은 하드 링크를 사용할 수 있다. 런타임은
+    # 검토된 web_dist 출력만 필요로 하므로, 단일 링크 불변식을 약화시키는 대신
+    # 릴리스 인벤토리가 봉인되기 전에 빌드 의존성을 제거한다.
     node_modules = release / "node_modules"
     if node_modules.exists() or node_modules.is_symlink():
         if not node_modules.is_dir() or node_modules.is_symlink():
@@ -868,7 +868,7 @@ print(json.dumps({"version": 1, "count": len(bytecode), "sha256": digest.hexdige
 
 
 def _release_bytecode_validation(release: Path, *, require_complete: bool) -> dict[str, object]:
-    """Validate pyc with the release interpreter that defines its format."""
+    """pyc를 그 형식을 정의하는 릴리스 인터프리터로 검증한다."""
     release = Path(release)
     if not release.is_absolute() or not release.is_dir() or release.is_symlink():
         raise RuntimeError("bytecode inventory requires a real absolute release directory")
@@ -913,14 +913,14 @@ def _release_bytecode_validation(release: Path, *, require_complete: bool) -> di
 
 
 def _partial_bytecode_paths(release: Path) -> set[str]:
-    """Validate any pyc left before a receipt, allowing an interrupted compile."""
+    """영수증 이전에 남겨진 pyc를 검증하되, 중단된 컴파일은 허용한다."""
     if not any(release.rglob("*.pyc")):
         return set()
     return set(_release_bytecode_validation(release, require_complete=False)["paths"])
 
 
 def _bytecode_inventory(release: Path) -> dict[str, object]:
-    """Verify and summarize the release's complete checked-hash bytecode set."""
+    """릴리스의 완전한 checked-hash 바이트코드 집합을 검증하고 요약한다."""
     result = _release_bytecode_validation(release, require_complete=True)
     return {key: result[key] for key in ("version", "count", "sha256")}
 
@@ -944,7 +944,7 @@ def _persist_bytecode(release: Path) -> None:
 
 
 def _precompile_release_bytecode(release: Path) -> dict[str, object]:
-    """Materialize deterministic checked-hash pyc before sealing a release."""
+    """릴리스를 봉인하기 전에 결정적 checked-hash pyc를 실체화한다."""
     release = Path(release)
     if not release.is_absolute() or not release.is_dir() or release.is_symlink():
         raise RuntimeError("bytecode precompilation requires a real absolute release directory")
@@ -1011,7 +1011,7 @@ def _precompile_release_bytecode(release: Path) -> dict[str, object]:
 
 
 def _expected_bytecode_fingerprint(release: Path, carried: str) -> str:
-    """Return the exact checkout fingerprint Hermes' launch guard expects."""
+    """Hermes의 실행(launch) 가드가 기대하는 정확한 체크아웃 지문을 반환한다."""
     carried = _sha(carried, "carried")
     try:
         ref = _run_git(release, "symbolic-ref", "HEAD")
@@ -1036,7 +1036,7 @@ def _verify_bytecode_fingerprint(release: Path, carried: str) -> None:
 
 
 def _publish_bytecode_fingerprint(release: Path, carried: str) -> None:
-    """Durably install Hermes' launch stamp before the release is receipted."""
+    """릴리스에 영수증이 발급되기 전에 Hermes의 실행 스탬프를 내구성 있게 설치한다."""
     data = _expected_bytecode_fingerprint(release, carried).encode("utf-8")
     candidate = release / f"{_BYTECODE_FINGERPRINT}.{secrets.token_hex(16)}"
     stamp = release / _BYTECODE_FINGERPRINT
@@ -1102,20 +1102,19 @@ def build_source_release(
             ("credential.helper", ""),
             ("protocol.allow", "never"),
             ("protocol.https.allow", "always"),
-            # The persisted policy refuses the file transport even when the
-            # source is local: the only file this build may ever read through a
-            # transport is the private bundle copy below, and that one fetch
-            # names the allowance on its own command line instead of leaving it
-            # standing for every later Git invocation in this repository.
+            # 영구 저장된 정책은 소스가 로컬이어도 file 전송을 거부한다. 이 빌드가
+            # 전송 계층을 통해 읽을 수 있는 유일한 파일은 아래의 비공개 bundle
+            # 복사본이며, 해당 fetch는 이 저장소의 이후 모든 Git 호출에 허용을
+            # 계속 남겨 두는 대신 자체 명령줄에서만 허용을 명시한다.
             ("protocol.file.allow", "never"),
         ):
             _run_git(temporary, "config", "--local", key, value)
-        # A test-only local source is the one other file-transport read this
-        # build may perform, and it is allowed for exactly that one command.
+        # 테스트 전용 로컬 소스는 이 빌드가 수행할 수 있는 나머지 하나의 file 전송
+        # 읽기이며, 정확히 해당 명령 하나에만 허용된다.
         source_transport = _FILE_TRANSPORT if allow_local_source else ()
-        # Fetch the reviewed immutable snapshot directly. The moving main may
-        # advance while this release is being validated; reachable exact object
-        # IDs remain fetchable without turning the next update into a blocker.
+        # 리뷰된 불변 snapshot을 직접 fetch한다. 이 release를 검증하는 동안 이동하는
+        # main이 전진할 수 있지만, 도달 가능한 정확한 object ID는 계속 fetch할 수
+        # 있으므로 다음 update를 막지 않는다.
         _run_git(
             temporary,
             *source_transport,
@@ -1147,10 +1146,9 @@ def build_source_release(
             raise RuntimeError("reviewed bundle refs are not a contiguous carried sequence")
         if bundle_refs[-1][1] != carried:
             raise RuntimeError("final carried bundle ref does not match requested carried SHA")
-        # Git routes a bundle path through the file transport, so this fetch -
-        # and only this fetch - carries the allowance. Its argument is the
-        # private 128-bit-named copy this function just wrote inside the
-        # temporary .git directory, never a caller-supplied path.
+        # Git은 bundle 경로를 file 전송으로 처리하므로 이 fetch, 그리고 이 fetch만
+        # 허용 설정을 지닌다. 인자는 호출자가 제공한 경로가 아니라 이 함수가 임시
+        # .git 디렉터리 안에 방금 쓴 비공개 128-bit 이름의 복사본이다.
         _run_git(
             temporary,
             *_FILE_TRANSPORT,
@@ -1215,7 +1213,7 @@ def build_source_release(
 
 
 def selected_release(layout: ReleaseLayout) -> str | None:
-    """Return the release the installed launcher would execute, if any."""
+    """설치된 launcher가 실행할 release가 있으면 반환한다."""
     try:
         info = os.lstat(layout.selector)
     except FileNotFoundError:
@@ -1303,7 +1301,7 @@ def _release_references_in_text(root: Path, text: str) -> set[Path]:
 
 
 def collect_runtime_references(root: Path, launchd_plist: Path) -> set[Path]:
-    """Collect canonical, loaded-launchd, and process references fail closed."""
+    """정규 참조, 로드된 launchd 참조, 프로세스 참조를 fail closed 방식으로 수집한다."""
     references: set[Path] = set()
     try:
         plist_info = os.lstat(launchd_plist)
@@ -1478,7 +1476,7 @@ def _validate_real_directory_ancestry(path: Path) -> None:
 def plan_release_gc(
     agent_repo: Path, *, runtime_references: set[Path]
 ) -> GcPlan:
-    """Return a deterministic no-write plan for verified immutable releases."""
+    """검증된 불변 release를 위한 결정론적 비기록 계획을 반환한다."""
     root = release_root(agent_repo)
     _validate_real_directory_ancestry(root)
     root_info = os.lstat(root)
@@ -2587,7 +2585,7 @@ def apply_release_gc(
     runtime_reference_supplier,
     lock_verifier,
 ) -> dict[str, object]:
-    """Retire and delete verified releases while the activation lock is held."""
+    """활성화 lock을 보유한 동안 검증된 release를 폐기하고 삭제한다."""
     if lock_verifier is None:
         raise RuntimeError("release GC requires the shared activation lock")
     lock_verifier()
@@ -3020,7 +3018,7 @@ def apply_release_gc(
 
 
 def _owned_incomplete_fingerprint_paths(release: Path) -> set[str]:
-    """Return only exact producer stamp artifacts safe to retire after a crash."""
+    """충돌 후 안전하게 폐기할 수 있는 정확한 producer stamp 산출물만 반환한다."""
     carried = _run_git(release, "rev-parse", "HEAD")
     expected = _expected_bytecode_fingerprint(release, carried).encode("utf-8")
     owned: set[str] = set()
@@ -3045,16 +3043,15 @@ def _owned_incomplete_fingerprint_paths(release: Path) -> set[str]:
 
 
 def _retire_incomplete_release(layout: ReleaseLayout) -> None:
-    """Durably retire a release only this project could have left unfinished.
+    """이 프로젝트만 미완성으로 남겼을 수 있는 release를 내구성 있게 폐기한다.
 
-    The release is published at its stable path before its dependencies are
-    synced, because a venv records absolute paths and cannot be moved
-    afterwards. A sync that fails, or a crash before the completion receipt is
-    published, therefore leaves a release no later run could ever complete. It
-    is retired only when it is provably ours - the exact carried tip, with no
-    change beyond the venv this project builds - and provably unused, and the
-    rename is made durable before anything is deleted, so an interruption
-    leaves an inert private directory rather than a half-removed release.
+    venv는 절대 경로를 기록하여 나중에 이동할 수 없으므로, release는 dependency를
+    동기화하기 전에 안정 경로에 게시된다. 따라서 sync 실패나 완료 receipt 게시 전
+    충돌은 이후 어떤 실행으로도 완료할 수 없는 release를 남긴다. 정확한 carried
+    tip이며 이 프로젝트가 빌드하는 venv 이외에는 변경 사항이 없어 이 프로젝트의
+    것임이 증명되고, 사용 중이지 않음도 증명된 경우에만 이를 폐기한다. 또한
+    무엇이든 삭제하기 전에 rename을 내구성 있게 만들어, 중단되더라도 반쯤 제거된
+    release 대신 비활성 비공개 디렉터리가 남도록 한다.
     """
     collisions = case_collisions(layout.release, "HEAD")
     records = _materialized_case_collisions(layout.release, collisions, rewrite=False)
@@ -3137,7 +3134,7 @@ def prepare_release(
     source_url: str = OFFICIAL_REPO_URL,
     allow_local_source: bool = False,
 ) -> Path:
-    """Idempotently construct and dependency-sync one exact release."""
+    """정확한 release 하나를 멱등하게 구성하고 dependency를 동기화한다."""
     if layout.release.exists() or layout.release.is_symlink():
         if not layout.release.is_dir() or layout.release.is_symlink():
             raise RuntimeError("existing release path is not a real directory")
@@ -3276,9 +3273,8 @@ def _completion_payload(layout: ReleaseLayout, upstream: str, carried: str) -> d
         "for-each-ref",
         "--format=%(refname) %(objectname)",
     ).splitlines()
-    # The folded groups are re-derived from this release's own tree and re-proven
-    # against its own bytes, so the receipt binds the normalization decision as
-    # tightly as it binds the rest of the inventory.
+    # 정규화된 그룹은 이 release 자체의 tree에서 다시 유도하고 자체 byte를 기준으로
+    # 다시 입증하므로, receipt는 나머지 inventory만큼 엄격하게 정규화 결정도 결속한다.
     collisions = case_collisions(layout.release, "HEAD")
     return {
         "version": 2,
@@ -3414,17 +3410,17 @@ def main() -> int:
     render.add_argument("selector_candidate", type=Path)
     render.add_argument("launcher_candidate", type=Path)
     _add_baseline_arguments(render)
-    # Rendering only the launcher must not depend on the release directory, so
-    # uninstall can still prove launcher provenance after a release is gone.
+    # launcher만 rendering할 때는 release 디렉터리에 의존하지 않아야 release가 사라진
+    # 뒤에도 uninstall에서 launcher의 출처를 입증할 수 있다.
     render_launcher = subparsers.add_parser("render-launcher")
     render_launcher.add_argument("agent_repo", type=Path)
     render_launcher.add_argument("upstream")
     render_launcher.add_argument("carried")
     render_launcher.add_argument("launcher_candidate", type=Path)
     _add_baseline_arguments(render_launcher)
-    # Activation only swaps the selector. Emitting a launcher candidate there
-    # would mean inventing a baseline, and an unused candidate carrying a wrong
-    # binding is a live footgun, so the selector half stands alone.
+    # 활성화는 selector만 교체한다. 여기서 launcher candidate를 내보내면 baseline을
+    # 지어내는 셈이고, 잘못된 binding을 지닌 미사용 candidate는 실제 사고를 유발할
+    # 위험 요소이므로 selector 부분만 독립적으로 둔다.
     render_selector = subparsers.add_parser("render-selector")
     render_selector.add_argument("agent_repo", type=Path)
     render_selector.add_argument("upstream")
@@ -3574,8 +3570,8 @@ def main() -> int:
         print(layout.selector)
         return 0
     if args.action == "launcher-baseline":
-        # Exit 3 means "provably not our launcher"; any other non-zero is an
-        # internal fault, so callers never have to read a crash as a verdict.
+        # 종료 코드 3은 "우리 launcher가 아님이 입증됨"을 뜻한다. 그 밖의 0이 아닌
+        # 값은 내부 결함이므로, 호출자가 충돌을 판정 결과로 해석할 필요가 없다.
         try:
             token = launcher_baseline(layout, _stable_regular_bytes(args.launcher))
         except ForeignLauncher as exc:

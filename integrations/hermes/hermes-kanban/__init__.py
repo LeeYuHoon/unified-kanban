@@ -1,4 +1,4 @@
-"""Forward bounded Hermes lifecycle fields to Unified Kanban observation state."""
+"""범위가 제한된 Hermes 라이프사이클 필드를 Unified Kanban 관측 상태로 전달한다."""
 
 from __future__ import annotations
 
@@ -53,9 +53,9 @@ def _on_pre_llm_call(**kwargs):
 
 
 def _on_post_tool_call(**kwargs):
-    """Count one tool call. Only ``tool_name`` and ``args`` are forwarded, and
-    the tracker reads nothing from ``args`` except a skill name -- ``result``,
-    ``middleware_trace`` and the rest never leave this hook."""
+    """도구 호출 한 건을 집계한다. ``tool_name``과 ``args``만 전달되며,
+    트래커는 ``args``에서 스킬 이름 외에는 아무것도 읽지 않는다 -- ``result``,
+    ``middleware_trace`` 및 나머지는 결코 이 훅 밖으로 나가지 않는다."""
     if not _runtime_enabled:
         return None
     try:
@@ -85,8 +85,8 @@ def _on_subagent_start(**kwargs):
 
 
 def _on_post_llm_call(**kwargs):
-    """Record the turn's model and a bounded summary. ``user_message`` and
-    ``conversation_history`` are deliberately not forwarded."""
+    """턴의 모델과 범위가 제한된 요약을 기록한다. ``user_message``와
+    ``conversation_history``는 의도적으로 전달하지 않는다."""
     if not _runtime_enabled:
         return None
     try:
@@ -102,7 +102,7 @@ def _on_post_llm_call(**kwargs):
 
 
 def _on_post_api_request(**kwargs):
-    """Forward only normalized numeric usage and opaque request identity."""
+    """정규화된 숫자 사용량과 불투명한 요청 식별자만 전달한다."""
     if not _runtime_enabled:
         return None
     try:
@@ -133,7 +133,7 @@ def _on_session_end(**kwargs):
 
 
 def register(ctx) -> None:
-    """Register hooks only when the installed Hermes upstream is supported."""
+    """설치된 Hermes 업스트림이 지원되는 경우에만 훅을 등록한다."""
     if not _refresh_runtime_compatibility():
         return
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)

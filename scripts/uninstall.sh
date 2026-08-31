@@ -45,9 +45,9 @@ HERMES_PLUGIN_SOURCE="$REPO_ROOT/integrations/hermes/hermes-kanban"
 HERMES_PLUGIN_TARGET="$HERMES_HOME/plugins/hermes-kanban"
 AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
 [[ "$AGENT_REPO" == /* ]] || { echo "HERMES_AGENT_REPO must be absolute" >&2; exit 1; }
-# The selector this removes and the launcher the release manager re-renders must
-# be derived from the same normal form, or uninstall would refuse a launcher it
-# installed itself.
+# 여기서 제거하는 선택자와 릴리스 관리자가 다시 렌더링하는 실행기는 동일한
+# 정규형에서 유도해야 한다. 그렇지 않으면 제거 과정이 자신이 설치한 실행기를
+# 거부하게 된다.
 AGENT_REPO="$(PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
   python3 -m kanban_adapter.release_layout "$AGENT_REPO")" || exit 1
 HERMES_RELEASE_SELECTOR="${AGENT_REPO}.releases/current"
@@ -230,10 +230,10 @@ if ((HERMES_PLUGIN_MANAGED)); then
   remove_managed_link "$HERMES_PLUGIN_TARGET" "$HERMES_PLUGIN_SOURCE"
 fi
 
-# Read the reviewed pin and carried manifest through the same trusted readers
-# setup uses: nofollow descriptors, inode revalidation, and full 40-hex
-# validation. A plain redirect here would accept a swapped or malformed pin that
-# setup would have refused.
+# setup과 동일한 신뢰된 읽기 방식, 즉 심볼릭 링크를 따라가지 않는 디스크립터,
+# inode 재검증, 전체 40자리 16진수 검증을 통해 검토된 핀과 반입 매니페스트를 읽는다.
+# 여기서 일반 리디렉션을 사용하면 setup이 거부했을 교체되거나 잘못된 핀을
+# 받아들이게 된다.
 if ! REVIEWED="$(PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
   'from kanban_adapter.compatibility import read_supported_upstream, read_carried_commits
 print(read_supported_upstream())
@@ -243,11 +243,10 @@ print(read_carried_commits()[-1])')"; then
 fi
 EXPECTED_UPSTREAM="${REVIEWED%%$'\n'*}"
 FINAL_CARRIED_COMMIT="${REVIEWED##*$'\n'}"
-# Decide restore-versus-remove from the frozen transaction snapshot, never from
-# a live re-read of the backup pathname, and re-derive the launcher the
-# installer must have produced for exactly that snapshot. A foreign replacement,
-# an injection where no original existed, and a deletion of the retained backup
-# each change the binding, so none of them can be adopted into the launcher.
+# 백업 경로명을 라이브 상태에서 다시 읽지 않고 고정된 트랜잭션 스냅샷을 기준으로
+# 복원할지 제거할지 결정하며, 설치기가 정확히 그 스냅샷에 대해 만들었어야 할
+# 실행기를 다시 유도한다. 외부 교체, 원본이 없던 곳의 삽입, 보존된 백업의 삭제는
+# 각각 바인딩을 바꾸므로 어느 것도 실행기에 채택할 수 없다.
 BACKUP_BEFORE="$TRANSACTION_DIR/hermes-launcher-backup-before"
 python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
   "$TRANSACTION_RECEIPT" "$HERMES_LAUNCHER_BACKUP" "$BACKUP_BEFORE"
@@ -259,11 +258,10 @@ if [[ -f "$BACKUP_BEFORE" ]]; then
 fi
 SELECTOR_BEFORE_KIND="$(python3 "$REPO_ROOT/scripts/path-transaction.py" before-kind \
   "$TRANSACTION_RECEIPT" "$HERMES_RELEASE_SELECTOR")"
-# With neither ownership artifact present at transaction opening, a prior
-# uninstall already completed or ownership evidence was removed. Either way,
-# the current launcher is outside this transaction's authority and must be
-# preserved. If either artifact remains, retain the strict binding checks so a
-# partial deletion cannot bypass fail-closed uninstall behavior.
+# 트랜잭션을 열 때 소유권 산출물이 둘 다 없다면 이전 제거가 이미 완료됐거나 소유권
+# 증거가 제거된 것이다. 어느 경우든 현재 실행기는 이 트랜잭션의 권한 밖에 있으므로
+# 보존해야 한다. 산출물 중 하나라도 남아 있다면 엄격한 바인딩 검사를 유지하여 부분
+# 삭제가 닫힌 상태로 실패하는 제거 동작을 우회하지 못하게 한다.
 if [[ "$SELECTOR_BEFORE_KIND" != "absent" || "$BACKUP_RETAINED" == 1 ]]; then
   EXPECTED_LAUNCHER="$TRANSACTION_DIR/expected-hermes-launcher"
   python3 "$REPO_ROOT/scripts/hermes-release-manager.py" render-launcher \

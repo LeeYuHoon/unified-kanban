@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atomically merge or remove repository-owned Claude and Codex hook entries."""
+"""저장소가 소유한 Claude 및 Codex 훅 항목을 원자적으로 병합하거나 제거한다."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ CLAUDE_EVENTS = {
     "Stop": "stop",
     "SessionEnd": "session-end",
 }
-# Codex CLI 0.145 exposes native PostToolUse (tool_name/tool_input/model),
-# SubagentStart (agent_type) and SessionEnd hooks, so Codex records the same
-# usage categories as Claude Code apart from Skills, which no Codex hook
-# event names.
+# Codex CLI 0.145는 네이티브 PostToolUse(tool_name/tool_input/model),
+# SubagentStart(agent_type), SessionEnd 훅을 제공하므로, Codex는 Claude Code와
+# 동일한 사용 범주를 기록한다. 단 Skills는 예외인데, 이를 가리키는 Codex 훅
+# 이벤트 이름이 없기 때문이다.
 CODEX_EVENTS = {
     "UserPromptSubmit": "prompt",
     "PostToolUse": "post-tool-use",
@@ -803,7 +803,7 @@ def apply_batch(
 
 
 def main() -> int:
-    """Validate arguments and apply one atomic multi-provider hook operation."""
+    """인자를 검증하고 원자적인 다중 제공자 훅 작업 하나를 적용한다."""
     if (
         len(sys.argv) in {6, 8}
         and sys.argv[1] in {"batch-install", "batch-uninstall", "batch-validate"}

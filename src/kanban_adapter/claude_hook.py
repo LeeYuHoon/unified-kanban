@@ -1,4 +1,4 @@
-"""Retry-safe shared hook state machine for Claude and normalized Codex events."""
+"""Claude와 정규화된 Codex 이벤트를 위한, 재시도에 안전한 공유 훅 상태 기계."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _create_idempotency_key(
 
 
 def run_adapter(argv: list[str], cwd: Path) -> str:
-    """Invoke the installed adapter in the event's project directory."""
+    """설치된 어댑터를 이벤트의 프로젝트 디렉터리에서 호출한다."""
     adapter = Path.home() / ".local/bin/kanban-adapter"
     fd_paths = [
         argument.split("=", 1)[-1]
@@ -91,7 +91,7 @@ def run_adapter(argv: list[str], cwd: Path) -> str:
 
 
 def cache_dir_for(kind: str) -> Path:
-    """Return the private per-provider hook state directory."""
+    """제공자별 전용(private) 훅 상태 디렉터리를 반환한다."""
     root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     return root / "kanban-adapter" / kind
 
@@ -155,8 +155,8 @@ def _write_state(
             directory_fd=directory_fd,
         )
     except CommittedPublicationError as exc:
-        # The canonical entry was verified as the installed inode.  Thread
-        # that live receipt rather than leaking it or retaining stale state.
+        # 정식(canonical) 엔트리가 설치된 inode로 검증되었다.  그 살아 있는
+        # receipt를 누출하거나 낡은 상태를 유지하는 대신 그대로 이어 전달한다.
         log_error(f"state-publication-durability: {exc}")
         return exc.receipt
 
@@ -258,17 +258,17 @@ def _complete(
                 token_snapshot(source, transcript_path),
                 state.get("token_baseline", {}),
             )
-        except Exception as exc:  # noqa: BLE001 - token telemetry must fail open
-            # Token collection is observability only; it must never strand the
-            # card or expose the transcript path in logs.
+        except Exception as exc:  # noqa: BLE001 - token telemetry는 fail open이어야 한다
+            # token 수집은 관측 용도일 뿐이므로 card를 고립시키거나 log에 transcript
+            # 경로를 노출해서는 안 된다.
             log_error(
                 f"token-snapshot: {type(exc).__name__}",
                 kind="claude" if source == "claude-code" else source,
             )
     if has_reportable_usage(source, usage) and not state.get("usage_comment_posted"):
-        # The event id is derived from the card, not from this process, so a
-        # retry after a crash or a failed marker write recomputes the same
-        # value and the adapter recognises the comment it already appended.
+        # event id는 이 프로세스가 아니라 card에서 유도한다. 따라서 충돌이나 marker
+        # 쓰기 실패 후 재시도해도 같은 값을 다시 계산하며, adapter는 이미 추가한
+        # comment를 인식한다.
         event_id = usage_event_id(source, state["task_id"])
         message = usage_comment(
             source=source,
@@ -309,8 +309,8 @@ def _complete(
         state_identity.close()
         raise
     result_option = f"--result-file=/dev/fd/{result_identity.file_fd}"
-    # Detach canonical state before the external side effect. A successful
-    # completion can then never leave a predictable retry trigger behind.
+    # 외부 side effect 전에 정규 state를 분리한다. 그러면 성공적으로 완료된 뒤에는
+    # 예측 가능한 재시도 trigger가 절대 남지 않는다.
     try:
         validate_directory(state_path.parent, directory_fd)
         detached = detach_expected(
@@ -408,12 +408,12 @@ def _handle_event_locked(
             try:
                 baseline = token_snapshot(source, transcript_path)
             except TranscriptNotReady:
-                # New sessions may not create their JSONL until after the
-                # UserPromptSubmit hook. Preserve the trusted candidate with
-                # an empty baseline so Stop can collect the first request.
+                # 새 session은 UserPromptSubmit hook 이후에야 JSONL을 만들 수 있다.
+                # Stop이 첫 요청을 수집할 수 있도록 신뢰된 candidate를 빈 baseline과
+                # 함께 보존한다.
                 new_state["transcript_path"] = transcript_path
                 new_state["token_baseline"] = {}
-            except Exception as exc:  # noqa: BLE001 - token telemetry must fail open
+            except Exception as exc:  # noqa: BLE001 - token telemetry는 fail open이어야 한다
                 log_error(
                     f"token-baseline: {type(exc).__name__}",
                     kind="claude" if source == "claude-code" else source,
@@ -444,9 +444,9 @@ def _handle_event_locked(
             return
         state, state_identity = read
         if event == "subagent-start":
-            # Codex reports each delegated child through SubagentStart; its
-            # agent_type is the only name the runtime exposes. A name outside
-            # the identifier whitelist is dropped rather than recorded.
+            # Codex는 위임된 각 child를 SubagentStart를 통해 보고하며, agent_type은
+            # runtime이 노출하는 유일한 이름이다. identifier 허용 목록 밖의 이름은
+            # 기록하지 않고 버린다.
             role = classify_subagent(payload.get("agent_type"))
             entry = None if role is None else ("subagents", role)
         else:
@@ -475,7 +475,7 @@ def _handle_event_locked(
     label = _SOURCE_LABEL.get(source, "Agent")
 
     def merge_model() -> None:
-        """Fold a late-arriving model into state before the card is reported."""
+        """card를 보고하기 전에 늦게 도착한 model을 state에 병합한다."""
         model = sanitize_model(payload.get("model"))
         if not model:
             return
@@ -529,7 +529,7 @@ def handle_event(
     cache_dir: Path | None = None,
     source: str = "claude-code",
 ) -> None:
-    """Serialize and apply one provider event under a per-session file lock."""
+    """session별 file lock 아래에서 provider event 하나를 직렬화하여 적용한다."""
     session_id = _required_text(payload, "session_id")
     cache = cache_dir or cache_dir_for("claude")
     directory_fd = _ensure_cache(cache)
@@ -555,7 +555,7 @@ def handle_event(
 
 
 def log_error(message: str, *, kind: str = "claude") -> None:
-    """Best-effort diagnostic without mutating a public cache pathname."""
+    """공개 cache 경로명을 변경하지 않고 최선형 진단을 수행한다."""
     try:
         sanitized = message.replace("\n", " ")
         print(f"kanban-adapter[{kind}]: {sanitized}", file=sys.stderr)
@@ -564,7 +564,7 @@ def log_error(message: str, *, kind: str = "claude") -> None:
 
 
 def main(argv: Sequence[str] | None = None, *, stdin: TextIO | None = None) -> int:
-    """Read one Claude hook payload; observation failures remain fail open."""
+    """Claude hook payload 하나를 읽으며, 관측 실패는 계속 fail open으로 처리한다."""
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1:
         print(

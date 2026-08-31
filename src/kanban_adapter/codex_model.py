@@ -1,21 +1,20 @@
-"""Codex model resolution for hook events that omit ``model``.
+"""``model``이 누락된 hook 이벤트를 위한 Codex 모델 결정.
 
-Codex 0.145's hook input schemas require ``model`` on UserPromptSubmit,
-PostToolUse, SubagentStart and Stop, but SessionEnd carries none and older or
-future builds may drop it. The one recovered value is the model recorded for
-*this exact session* in Codex's state database.
+Codex 0.145의 hook 입력 스키마는 UserPromptSubmit, PostToolUse,
+SubagentStart, Stop에서 ``model``을 요구하지만, SessionEnd는 이를 담지
+않으며 더 오래되거나 미래의 빌드는 이를 생략할 수 있다. 복구되는 유일한
+값은 Codex의 state 데이터베이스에 *바로 이 세션*에 대해 기록된 모델이다.
 
-There is deliberately no second source. A machine-wide default -- such as the
-top-level ``model`` in ``config.toml`` -- is not this session's model; reporting
-it would put a plausible but unverified identifier on a card, which is worse
-than an honest gap. When the session row cannot be read, the model is simply
-left unrecorded.
+의도적으로 두 번째 출처는 없다. ``config.toml``의 최상위 ``model`` 같은
+머신 전역 기본값은 이 세션의 모델이 아니다; 이를 보고하면 그럴듯하지만
+검증되지 않은 식별자가 카드에 기록되는데, 이는 정직한 공백보다 나쁘다.
+세션 행을 읽을 수 없으면 모델은 그냥 기록되지 않은 채로 남는다.
 
-Only the model identifier is ever read: the SQL projection names the single
-``model`` column, so no prompt, cwd, or title can be returned by accident. The
-database is opened read-only, and its path is checked to be a regular
-non-symlink file both before and after the connection is opened, so a file
-swapped in mid-call is refused rather than read.
+읽는 것은 오직 모델 식별자뿐이다: SQL 프로젝션이 단일 ``model`` 컬럼만
+지정하므로 prompt, cwd, title이 실수로 반환될 수 없다. 데이터베이스는
+읽기 전용으로 열리며, 그 경로는 연결을 열기 전과 후 모두 심볼릭 링크가
+아닌 일반 파일인지 검사되므로, 호출 도중 바꿔치기된 파일은 읽히는 대신
+거부된다.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ def default_codex_home() -> Path:
 
 
 def default_state_db(codex_home: Path | None = None) -> Path | None:
-    """Newest versioned Codex state database, or None when there is none."""
+    """버전이 가장 높은 최신 Codex state 데이터베이스, 없으면 None."""
     home = codex_home or default_codex_home()
     best: tuple[int, Path] | None = None
     try:
@@ -56,10 +55,10 @@ def default_state_db(codex_home: Path | None = None) -> Path | None:
 
 
 def _regular_file_stat(path: Path | None) -> os.stat_result | None:
-    """``lstat`` of a plain regular file, or None for anything else.
+    """순수 일반 파일의 ``lstat`` 결과, 그 외에는 None.
 
-    ``lstat`` rather than ``stat`` so a symlink is seen as a symlink and
-    refused instead of being followed to whatever it points at.
+    ``stat`` 대신 ``lstat``을 쓰는 이유는 심볼릭 링크가 가리키는 대상으로
+    따라가는 대신 심볼릭 링크를 심볼릭 링크로 보고 거부하기 위해서다.
     """
     if path is None:
         return None
@@ -73,7 +72,7 @@ def _regular_file_stat(path: Path | None) -> os.stat_result | None:
 
 
 def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
-    """Whether two stats describe the same file with unchanged permissions."""
+    """두 stat이 권한 변경 없이 동일한 파일을 나타내는지 여부."""
     return (before.st_dev, before.st_ino, before.st_mode) == (
         after.st_dev,
         after.st_ino,
@@ -82,11 +81,11 @@ def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
 
 
 def _read_only_uri(path: Path) -> str:
-    """SQLite read-only URI for ``path``.
+    """``path``에 대한 SQLite 읽기 전용 URI.
 
-    The path is percent-encoded because SQLite parses ``?`` and ``#`` in a URI
-    as query and fragment delimiters; a Codex home containing either would
-    otherwise silently open a different database.
+    경로를 퍼센트 인코딩하는 이유는 SQLite가 URI의 ``?``와 ``#``을 쿼리와
+    프래그먼트 구분자로 파싱하기 때문이다; 둘 중 하나를 포함한 Codex home은
+    그렇지 않으면 조용히 다른 데이터베이스를 열게 된다.
     """
     return f"file:{quote(str(path))}?mode=ro"
 
@@ -104,10 +103,10 @@ def _model_from_state_db(session_id: str, state_db: Path | None) -> str | None:
             uri=True,
             timeout=_QUERY_TIMEOUT_SECONDS,
         )
-        # Between the first lstat and the open, the path could have been
-        # replaced -- with a symlink, a FIFO, or another user's database.
-        # Re-check before running any statement and fail closed on any
-        # difference, so at worst the model goes unrecorded.
+        # 첫 lstat과 open 사이에 경로가 심볼릭 링크, FIFO, 또는 다른
+        # 사용자의 데이터베이스로 교체되었을 수 있다.
+        # 어떤 문(statement)이든 실행하기 전에 다시 검사하고 차이가 있으면
+        # fail closed 하여, 최악의 경우에도 모델이 기록되지 않는 데 그친다.
         after = _regular_file_stat(state_db)
         if after is None or not _same_file(before, after):
             return None
@@ -128,12 +127,12 @@ def _model_from_state_db(session_id: str, state_db: Path | None) -> str | None:
 
 
 def resolve_model(session_id: str, *, state_db: Path | None) -> str | None:
-    """This session's Codex model, or None when it cannot be read exactly."""
+    """이 세션의 Codex 모델, 정확히 읽을 수 없으면 None."""
     return _model_from_state_db(session_id, state_db)
 
 
 def resolve_rollout_path(session_id: str, *, state_db: Path | None) -> str | None:
-    """Return this session's rollout path from Codex state, read-only and fail-closed."""
+    """Codex state에서 이 세션의 rollout 경로를 읽기 전용·fail-closed로 반환한다."""
     if not session_id or state_db is None:
         return None
     before = _regular_file_stat(state_db)

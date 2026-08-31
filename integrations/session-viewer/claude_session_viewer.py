@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
-"""AI Session Viewer — a read-only, dependency-free viewer for local AI coding
-agent sessions.
+"""AI Session Viewer — 로컬 AI 코딩 에이전트 세션을 위한 읽기 전용, 의존성 없는
+뷰어.
 
-Three providers are supported through adapters that feed one shared
-Session/Event/Turn model and one shared set of renderers:
+세 가지 공급자를 어댑터를 통해 지원하며, 어댑터들은 하나의 공유
+Session/Event/Turn 모델과 하나의 공유 렌더러 집합에 데이터를 공급한다:
 
-* ``claude``  — Claude Code JSONL transcripts under ``~/.claude/projects``
-* ``codex``   — OpenAI Codex CLI rollouts under ``~/.codex/sessions``
-* ``hermes``  — Hermes Agent's SQLite state at ``~/.hermes/state.db``
+* ``claude``  — ``~/.claude/projects`` 아래의 Claude Code JSONL 트랜스크립트
+* ``codex``   — ``~/.codex/sessions`` 아래의 OpenAI Codex CLI 롤아웃
+* ``hermes``  — ``~/.hermes/state.db`` 에 있는 Hermes Agent의 SQLite 상태
 
-Design rules (enforced by the test suite):
+설계 규칙(테스트 스위트로 강제됨):
 
-* Sources are opened read-only (SQLite via ``file:...?mode=ro``), streamed, and
-  never rewritten.
-* Nothing is ever written under ``~/.claude``, ``~/.codex`` or ``~/.hermes``;
-  ``--out`` destinations resolving inside any of them are rejected.
-* Malformed JSONL lines / rows are skipped and counted, never guessed at.
-* "Real" human prompts are separated from the many synthetic user-role records
-  the agents write (tool results, hooks, reminders, duplicated context). The
-  rules are per-provider heuristics; they are listed in
-  ``PROMPT_FILTER_RULES`` and surfaced in every rendered output.
-* Model reasoning and tool output are never rendered — only counted.
-* Redaction is on by default and is best-effort pattern matching only.
+* 소스는 읽기 전용으로 열리고(SQLite는 ``file:...?mode=ro`` 사용), 스트리밍으로
+  읽히며, 절대 다시 쓰이지 않는다.
+* ``~/.claude``, ``~/.codex``, ``~/.hermes`` 아래에는 어떤 것도 절대 쓰지 않는다;
+  이들 중 어느 곳 안으로 해석되는 ``--out`` 대상은 거부된다.
+* 형식이 잘못된 JSONL 줄/행은 건너뛰고 개수만 세며, 절대 내용을 추측하지 않는다.
+* "진짜" 사람 프롬프트는 에이전트가 기록하는 수많은 합성 user 역할 레코드
+  (도구 결과, 훅, 리마인더, 중복된 컨텍스트)와 분리된다. 이 규칙들은
+  공급자별 휴리스틱이며, ``PROMPT_FILTER_RULES`` 에 나열되고 렌더링되는
+  모든 출력에 표시된다.
+* 모델의 추론(reasoning)과 도구 출력은 절대 렌더링되지 않고 개수만 센다.
+* 마스킹(redaction)은 기본으로 켜져 있으며 최선 노력(best-effort) 패턴 매칭일
+  뿐이다.
 
-Standard library only. Python 3.9+ (3.8 also works).
+표준 라이브러리만 사용한다. Python 3.9+ (3.8에서도 동작).
 
-The executable keeps its historical name ``claude_session_viewer.py`` so old
-invocations and scripts keep working.
+실행 파일은 기존 호출과 스크립트가 계속 동작하도록 역사적인 이름
+``claude_session_viewer.py`` 를 유지한다.
 """
 
 import argparse
@@ -50,7 +51,7 @@ PROGRAM = "claude_session_viewer.py"
 TITLE = "AI Session Viewer"
 
 # ---------------------------------------------------------------------------
-# Providers
+# 공급자
 # ---------------------------------------------------------------------------
 
 PROVIDER_CLAUDE = "claude"
@@ -63,19 +64,19 @@ PROVIDER_CHOICES = PROVIDER_IDS + (PROVIDER_ALL,)
 
 
 class Provider(object):
-    """Static description of one supported agent."""
+    """지원되는 에이전트 하나에 대한 정적 설명."""
 
     def __init__(self, pid, label, product, default_root_parts, root_help, reason_key,
                  complete_reasons, reasoning_word, data_dir):
         self.id = pid
-        self.label = label            # badge / assistant label, e.g. "Codex"
-        self.product = product        # human product name for prose
+        self.label = label            # 배지/어시스턴트 라벨, 예: "Codex"
+        self.product = product        # 산문에 쓰는 사람이 읽는 제품 이름
         self.default_root_parts = default_root_parts
         self.root_help = root_help
-        self.reason_key = reason_key  # field name shown in honest status labels
+        self.reason_key = reason_key  # 정직한 상태 라벨에 표시되는 필드 이름
         self.complete_reasons = complete_reasons
         self.reasoning_word = reasoning_word
-        self.data_dir = data_dir      # protected application data directory name
+        self.data_dir = data_dir      # 보호되는 애플리케이션 데이터 디렉터리 이름
 
 
 PROVIDERS = {
@@ -120,12 +121,12 @@ def provider_of(pid):
 
 
 def provider_label(pid):
-    """Badge / assistant label for a provider id."""
+    """공급자 id에 대한 배지/어시스턴트 라벨."""
     return provider_of(pid).label
 
 
 def assistant_label(pid):
-    """What the agent's replies are labelled as in every renderer."""
+    """모든 렌더러에서 에이전트의 답변에 붙이는 라벨."""
     return provider_of(pid).label
 
 
@@ -133,7 +134,7 @@ def default_root_for(pid):
     return os.path.join(os.path.expanduser("~"), *provider_of(pid).default_root_parts)
 
 # ---------------------------------------------------------------------------
-# Event kinds
+# 이벤트 종류
 # ---------------------------------------------------------------------------
 
 KIND_USER = "user"
@@ -143,7 +144,7 @@ KIND_OTHER = "other"
 KIND_TURN = "turn"
 
 # ---------------------------------------------------------------------------
-# Documented, deliberately imperfect heuristics
+# 문서화된, 의도적으로 불완전한 휴리스틱
 # ---------------------------------------------------------------------------
 
 USER_PROMPT_FILTER_RULES = [
@@ -211,9 +212,9 @@ READ_ONLY_NOTE = (
     "opened read-only and never modified."
 ).format(title=TITLE)
 
-# Secret-ish patterns, applied in order. Deliberately conservative.
+# 비밀값처럼 보이는 패턴들. 순서대로 적용되며, 의도적으로 보수적이다.
 _SECRET_PATTERNS = [
-    # PEM private key blocks -> collapse the body, keep the envelope visible.
+    # PEM 개인 키 블록 -> 본문은 접어 감추고 envelope는 보이게 유지한다.
     (
         re.compile(
             r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?"
@@ -237,24 +238,24 @@ _SECRET_PATTERNS = [
 
 
 class TranscriptError(Exception):
-    """Raised when a transcript cannot be read at all."""
+    """트랜스크립트를 전혀 읽을 수 없을 때 발생한다."""
 
 
 class SelectorError(Exception):
-    """Raised when a session selector matches zero or multiple sessions."""
+    """세션 셀렉터가 0개 또는 여러 개의 세션과 일치할 때 발생한다."""
 
 
 class OutputPathError(Exception):
-    """Raised when an --out destination is unsafe."""
+    """--out 대상이 안전하지 않을 때 발생한다."""
 
 
 # ---------------------------------------------------------------------------
-# Redaction
+# 마스킹(redaction)
 # ---------------------------------------------------------------------------
 
 
 def redact(text, home=None):
-    """Best-effort masking of home paths and common secret shapes."""
+    """홈 경로와 흔한 비밀값 형태에 대한 최선 노력(best-effort) 마스킹."""
     if not isinstance(text, str) or not text:
         return text
     out = text
@@ -272,12 +273,12 @@ def maybe_redact(text, raw, home=None):
 
 
 # ---------------------------------------------------------------------------
-# Timestamp helpers
+# 타임스탬프 헬퍼
 # ---------------------------------------------------------------------------
 
 
 def format_mtime(mtime):
-    """Format a POSIX mtime as a readable UTC stamp."""
+    """POSIX mtime을 읽기 좋은 UTC 시각 문자열로 포맷한다."""
     try:
         dt = datetime.datetime.fromtimestamp(float(mtime), datetime.timezone.utc)
     except (TypeError, ValueError, OSError, OverflowError):
@@ -286,7 +287,7 @@ def format_mtime(mtime):
 
 
 def format_ts(raw):
-    """Format a transcript timestamp as UTC. Unparseable values pass through."""
+    """트랜스크립트 타임스탬프를 UTC로 포맷한다. 파싱 불가능한 값은 그대로 통과시킨다."""
     if raw is None:
         return None
     if not isinstance(raw, str):
@@ -309,7 +310,7 @@ def ts_or_placeholder(raw):
 
 
 def parse_epoch(raw):
-    """POSIX seconds for an ISO-8601 stamp, or None when unparseable."""
+    """ISO-8601 시각 문자열의 POSIX 초를 반환하고, 파싱 불가능하면 None을 반환한다."""
     if not isinstance(raw, str) or not raw.strip():
         return None
     value = raw.strip()
@@ -322,17 +323,17 @@ def parse_epoch(raw):
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     try:
         return dt.timestamp()
-    except (OverflowError, OSError, ValueError):  # pragma: no cover - defensive
+    except (OverflowError, OSError, ValueError):  # pragma: no cover - 방어적 예외 처리
         return None
 
 
 # ---------------------------------------------------------------------------
-# Content normalisation
+# 콘텐츠 정규화
 # ---------------------------------------------------------------------------
 
 
 def blocks_of(content):
-    """Normalise Claude content (str | dict | list | other) into block dicts."""
+    """Claude 콘텐츠(str | dict | list | 기타)를 블록 dict들로 정규화한다."""
     if content is None:
         return []
     if isinstance(content, str):
@@ -362,7 +363,7 @@ def _is_text_block(block):
 
 
 def text_of(blocks):
-    """Join the visible text of already-normalised blocks."""
+    """이미 정규화된 블록들의 보이는 텍스트를 이어 붙인다."""
     parts = [b["text"] for b in blocks if _is_text_block(b) and b["text"].strip()]
     return "\n\n".join(parts)
 
@@ -371,7 +372,7 @@ _REMINDER_RE = re.compile(r"<system-reminder>.*?(?:</system-reminder>|\Z)", re.S
 
 
 def strip_system_reminders(text):
-    """Return (text_without_reminders, had_reminder)."""
+    """(리마인더를 제거한 텍스트, 리마인더 존재 여부)를 반환한다."""
     if not isinstance(text, str) or "<system-reminder>" not in text:
         return (text or ""), False
     return _REMINDER_RE.sub("", text), True
@@ -383,11 +384,10 @@ def _message_of(rec):
 
 
 def classify_user_record(rec):
-    """Decide whether a record is a real human prompt.
+    """레코드가 진짜 사람 프롬프트인지 판정한다.
 
-    Returns ``(text, None)`` for real prompts and ``(None, reason)`` otherwise,
-    where ``reason`` is one of the keys documented in
-    :data:`USER_PROMPT_FILTER_RULES`.
+    진짜 프롬프트면 ``(text, None)`` 을, 아니면 ``(None, reason)`` 을 반환하며,
+    ``reason`` 은 :data:`USER_PROMPT_FILTER_RULES` 에 문서화된 키 중 하나다.
     """
     if not isinstance(rec, dict) or rec.get("type") != "user":
         return None, "not_user_role"
@@ -432,7 +432,7 @@ def _is_compaction(rec):
 
 
 class Event(object):
-    """One normalised transcript record, in file order."""
+    """정규화된 트랜스크립트 레코드 하나로, 파일 내 순서를 따른다."""
 
     __slots__ = (
         "index",
@@ -471,7 +471,7 @@ class Event(object):
         self.skip_reason = kw.get("skip_reason")
         self.record_type = kw.get("record_type")
 
-    def __repr__(self):  # pragma: no cover - debugging aid
+    def __repr__(self):  # pragma: no cover - 디버깅 지원
         return "<Event %d %s %r>" % (self.index, self.kind, self.text[:40])
 
 
@@ -481,14 +481,14 @@ def _timestamp_of(rec):
 
 
 def build_event(index, lineno, rec):
-    """Turn one raw record into an :class:`Event`. Never raises on odd input."""
+    """원시 레코드 하나를 :class:`Event` 로 변환한다. 이상한 입력에도 절대 예외를 던지지 않는다."""
     common = {
         "timestamp": _timestamp_of(rec),
         "is_sidechain": bool(rec.get("isSidechain")),
         "record_type": rec.get("type"),
     }
 
-    # Compaction is checked first so a summary is never merged into neighbours.
+    # 요약이 이웃 레코드에 병합되는 일이 없도록 압축(compaction) 여부를 가장 먼저 검사한다.
     if _is_compaction(rec):
         summary = rec.get("summary")
         if not isinstance(summary, str) or not summary.strip():
@@ -543,12 +543,12 @@ def build_event(index, lineno, rec):
 
 
 # ---------------------------------------------------------------------------
-# Streaming reader
+# 스트리밍 리더
 # ---------------------------------------------------------------------------
 
 
 def iter_raw_records(path):
-    """Yield ``(lineno, record_or_None, error_or_None)`` lazily, read-only."""
+    """``(lineno, record_or_None, error_or_None)`` 을 지연 방식으로, 읽기 전용으로 산출한다."""
     try:
         handle = io.open(path, "r", encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -572,8 +572,8 @@ def iter_raw_records(path):
 
 
 class Session(object):
-    """One agent session (a transcript file, or one row set of a database)
-    plus its normalised events. Shared by every provider adapter."""
+    """에이전트 세션 하나(트랜스크립트 파일 하나, 또는 데이터베이스의 행 집합 하나)와
+    그 정규화된 이벤트들. 모든 공급자 어댑터가 공유한다."""
 
     def __init__(self, path, events, malformed_count, mtime, session_id=None, cwd=None,
                  provider=PROVIDER_CLAUDE, title=None, model=None, source=None,
@@ -583,7 +583,7 @@ class Session(object):
         self.events = events
         self.malformed_count = malformed_count
         self.mtime = mtime
-        # Filenames are not assumed to equal session IDs; the field wins when present.
+        # 파일 이름이 세션 ID와 같다고 가정하지 않는다; 필드가 있으면 필드가 우선한다.
         self.session_id = session_id or self.file_stem
         self.session_id_from_filename = not session_id
         self.cwd = cwd
@@ -594,7 +594,7 @@ class Session(object):
         self.started_at = started_at
         self.ended_at = ended_at
         self.end_reason = end_reason
-        # Selector keys: what a user may type to name this session.
+        # 셀렉터 키: 사용자가 이 세션을 지목하기 위해 입력할 수 있는 값들.
         self._match_keys = list(match_keys) if match_keys else [
             self.session_id,
             self.file_stem,
@@ -613,7 +613,7 @@ class Session(object):
 
     @property
     def sort_time(self):
-        """Best-effort recency key: the session's own clock, else file mtime."""
+        """최선 노력의 최근성 키: 세션 자체의 시각을 쓰고, 없으면 파일 mtime을 쓴다."""
         parsed = parse_epoch(self.ended_at or self.started_at or self.last_timestamp)
         return parsed if parsed is not None else self.mtime
 
@@ -653,7 +653,7 @@ class Session(object):
 
 
 def load_session(path):
-    """Read one transcript file into a :class:`Session` (streaming, read-only)."""
+    """트랜스크립트 파일 하나를 :class:`Session` 으로 읽어 들인다(스트리밍, 읽기 전용)."""
     events = []
     malformed = 0
     session_id = None
@@ -681,17 +681,17 @@ def load_session(path):
 
 
 def real_prompts(session):
-    """The events judged to be real human prompts, in transcript order."""
+    """진짜 사람 프롬프트로 판정된 이벤트들, 트랜스크립트 순서대로."""
     return session.real_prompt_events
 
 
 # ---------------------------------------------------------------------------
-# Codex CLI adapter (~/.codex/sessions/**/*.jsonl)
+# Codex CLI 어댑터 (~/.codex/sessions/**/*.jsonl)
 #
-# Records are {timestamp, type, payload}. Only ``event_msg`` payloads of type
-# ``user_message`` are treated as human input; ``response_item`` messages replay
-# the same content together with system/developer context and are counted, not
-# shown. Reasoning and tool output are counted and never rendered.
+# 레코드는 {timestamp, type, payload} 형태다. ``user_message`` 타입의
+# ``event_msg`` payload만 사람 입력으로 취급한다; ``response_item`` 메시지는
+# 같은 내용을 system/developer 컨텍스트와 함께 재생(replay)하므로 개수만 세고
+# 표시하지 않는다. 추론(reasoning)과 도구 출력은 개수만 세고 절대 렌더링하지 않는다.
 # ---------------------------------------------------------------------------
 
 CODEX_TOOL_CALL_TYPES = {
@@ -728,12 +728,12 @@ CODEX_CONTEXT_PREFIXES = (
     "instructions",
 )
 
-# Files Codex keeps beside rollouts that are *not* sessions.
+# Codex가 롤아웃 옆에 두는, 세션이 *아닌* 파일들.
 CODEX_NON_SESSION_FILES = ("history.jsonl", "session_index.jsonl")
 
 
 def codex_text(value):
-    """Visible text of a Codex payload field (str | list-of-blocks | dict)."""
+    """Codex payload 필드(str | 블록 리스트 | dict)의 보이는 텍스트."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -755,7 +755,7 @@ def codex_text(value):
 
 
 def classify_codex_user_message(payload):
-    """(text, None) for real human input, (None, reason) otherwise."""
+    """진짜 사람 입력이면 (text, None), 아니면 (None, reason)을 반환한다."""
     text = codex_text(payload.get("message"))
     if not text:
         text = codex_text(payload.get("content"))
@@ -778,7 +778,7 @@ def _codex_tool_name(payload, ptype):
 
 
 def build_codex_event(index, lineno, rec):
-    """Normalise one Codex rollout record. Never raises on odd input."""
+    """Codex 롤아웃 레코드 하나를 정규화한다. 이상한 입력에도 절대 예외를 던지지 않는다."""
     payload = rec.get("payload")
     if not isinstance(payload, dict):
         payload = {}
@@ -828,7 +828,7 @@ def build_codex_event(index, lineno, rec):
                 **common
             )
         if ptype in CODEX_ERROR_TYPES:
-            # The error text itself is not presented as an assistant answer.
+            # 오류 텍스트 자체는 어시스턴트 답변으로 제시하지 않는다.
             return Event(index, lineno, KIND_ASSISTANT, text="", errored=True, **common)
         return Event(index, lineno, KIND_OTHER, **common)
 
@@ -853,7 +853,7 @@ def build_codex_event(index, lineno, rec):
                     skip_reason="duplicate_response_item",
                     **common
                 )
-            # Assistant messages duplicate the agent_message event.
+            # 어시스턴트 메시지는 agent_message 이벤트와 중복된다.
             return Event(index, lineno, KIND_OTHER, **common)
         if ptype in CODEX_TOOL_CALL_TYPES:
             return Event(
@@ -873,7 +873,7 @@ def build_codex_event(index, lineno, rec):
 
 
 def load_codex_session(path):
-    """Read one Codex rollout into a :class:`Session` (streaming, read-only)."""
+    """Codex 롤아웃 하나를 :class:`Session` 으로 읽어 들인다(스트리밍, 읽기 전용)."""
     events = []
     malformed = 0
     session_id = None
@@ -938,18 +938,18 @@ def find_codex_paths(root):
             if not name.endswith(".jsonl"):
                 continue
             if name in CODEX_NON_SESSION_FILES:
-                # history.jsonl / session_index.jsonl are indexes, not sessions.
+                # history.jsonl / session_index.jsonl 은 인덱스이지 세션이 아니다.
                 continue
             paths.append(os.path.join(dirpath, name))
     return paths
 
 
 # ---------------------------------------------------------------------------
-# Hermes Agent adapter (~/.hermes/state.db)
+# Hermes Agent 어댑터 (~/.hermes/state.db)
 #
-# The database is opened through a ``file:...?mode=ro`` URI so the connection
-# itself cannot write. Only active rows are read, in insertion (id) order.
-# Reasoning columns and tool row content are never rendered.
+# 데이터베이스는 ``file:...?mode=ro`` URI를 통해 열리므로 연결 자체가 쓰기를
+# 할 수 없다. active 행만 삽입(id) 순서대로 읽는다.
+# 추론(reasoning) 컬럼과 tool 행의 내용은 절대 렌더링하지 않는다.
 # ---------------------------------------------------------------------------
 
 HERMES_HIDDEN_DISPLAY_KINDS = (
@@ -969,13 +969,13 @@ HERMES_ABORT_REASONS = ("abort", "aborted", "cancel", "cancelled", "canceled",
 
 
 def open_hermes_db(path):
-    """Open the Hermes SQLite database strictly read-only."""
+    """Hermes SQLite 데이터베이스를 엄격하게 읽기 전용으로 연다."""
     absolute = os.path.abspath(str(path))
     if not os.path.exists(absolute):
         raise TranscriptError("Hermes database not found: %s" % path)
     try:
         from urllib.request import pathname2url
-    except ImportError:  # pragma: no cover - Python 2 only
+    except ImportError:  # pragma: no cover - Python 2 전용
         raise TranscriptError("cannot build a read-only sqlite URI")
     uri = "file:%s?mode=ro" % pathname2url(absolute)
     try:
@@ -985,7 +985,7 @@ def open_hermes_db(path):
 
 
 def _hermes_rows(conn, table):
-    """Return rows of ``table`` as dicts; tolerant of unknown column sets."""
+    """``table`` 의 행들을 dict로 반환한다; 알 수 없는 컬럼 구성도 허용한다."""
     try:
         if table == "sessions":
             cursor = conn.execute("SELECT * FROM sessions")
@@ -1000,13 +1000,13 @@ def _hermes_rows(conn, table):
 
 
 def decode_hermes_content(value):
-    """Decode a Hermes ``content`` cell. Malformed JSON degrades to raw text."""
+    """Hermes ``content`` 셀을 디코드한다. 형식이 잘못된 JSON은 원시 텍스트로 강등된다."""
     if value is None:
         return ""
     if isinstance(value, bytes):
         try:
             value = value.decode("utf-8", "replace")
-        except Exception:  # pragma: no cover - defensive
+        except Exception:  # pragma: no cover - 방어적 예외 처리
             return ""
     if not isinstance(value, str):
         return str(value)
@@ -1016,7 +1016,7 @@ def decode_hermes_content(value):
     try:
         parsed = json.loads(text)
     except ValueError:
-        return value  # plain text that merely looks like JSON
+        return value  # JSON처럼 보일 뿐인 일반 텍스트
     return _hermes_text_of(parsed)
 
 
@@ -1046,7 +1046,7 @@ def _hermes_text_of(parsed):
 
 
 def _hermes_tool_names(raw):
-    """Names of the tool calls encoded in an assistant ``tool_calls`` cell."""
+    """어시스턴트 ``tool_calls`` 셀에 인코딩된 도구 호출들의 이름."""
     if raw is None:
         return []
     if isinstance(raw, bytes):
@@ -1093,7 +1093,7 @@ def _is_hidden_display_kind(value):
 
 
 def build_hermes_event(index, row):
-    """Normalise one Hermes ``messages`` row."""
+    """Hermes ``messages`` 행 하나를 정규화한다."""
     role = (row.get("role") or "").strip().lower()
     timestamp = row.get("timestamp")
     if not isinstance(timestamp, str) or not timestamp.strip():
@@ -1134,7 +1134,7 @@ def build_hermes_event(index, row):
         )
 
     if role == "tool":
-        # Counted and named; the output itself is deliberately dropped here.
+        # 개수를 세고 이름만 남긴다; 출력 자체는 여기서 의도적으로 버린다.
         return Event(index, lineno, KIND_OTHER, tool_results=1, **common)
 
     if role == "user":
@@ -1159,7 +1159,7 @@ def build_hermes_event(index, row):
 
 
 def load_hermes_sessions(db_path):
-    """Read every session in a Hermes ``state.db`` (read-only)."""
+    """Hermes ``state.db`` 안의 모든 세션을 읽는다(읽기 전용)."""
     conn = open_hermes_db(db_path)
     try:
         session_rows = _hermes_rows(conn, "sessions")
@@ -1176,7 +1176,7 @@ def load_hermes_sessions(db_path):
     malformed = {}
     for row in message_rows:
         if "active" in row and not _hermes_truthy(row.get("active")):
-            continue  # rolled back / superseded rows are never loaded
+            continue  # 롤백되었거나 대체된 행은 절대 로드하지 않는다
         key = row.get("session_id")
         if key is None:
             malformed["__orphan__"] = malformed.get("__orphan__", 0) + 1
@@ -1219,13 +1219,13 @@ def load_hermes_sessions(db_path):
 
 
 # ---------------------------------------------------------------------------
-# Timeline
+# 타임라인
 # ---------------------------------------------------------------------------
 
 
 class Turn(object):
-    """One human prompt with the visible assistant reply that followed it,
-    or a standalone compaction boundary."""
+    """사람 프롬프트 하나와 그 뒤에 이어진 보이는 어시스턴트 답변,
+    또는 독립적인 압축(compaction) 경계."""
 
     def __init__(self, kind=KIND_TURN, prompt=None, timestamp=None, text=None,
                  provider=PROVIDER_CLAUDE):
@@ -1233,7 +1233,7 @@ class Turn(object):
         self.provider = provider
         self.prompt = prompt
         self.timestamp = timestamp
-        self.text = text  # compaction summary text
+        self.text = text  # 압축(compaction) 요약 텍스트
         self.final_text = None
         self.final_timestamp = None
         self.assistant_count = 0
@@ -1311,7 +1311,7 @@ class Turn(object):
 
 
 def build_timeline(session):
-    """Pair prompts with replies, preserving file order and compaction breaks."""
+    """프롬프트와 답변을 짝지으며, 파일 순서와 압축(compaction) 구분을 보존한다."""
     entries = []
     current = [None]
 
@@ -1363,9 +1363,9 @@ def build_timeline(session):
         if current[0] is None:
             current[0] = Turn(timestamp=ev.timestamp, provider=provider)
         turn = current[0]
-        # Hidden activity is aggregated wherever it is recorded: Claude keeps it
-        # on assistant records, Codex on separate response_item records, Hermes
-        # on assistant/tool rows.
+        # 숨겨진 활동은 기록된 위치가 어디든 집계한다: Claude는 assistant 레코드에,
+        # Codex는 별도의 response_item 레코드에, Hermes는 assistant/tool 행에
+        # 기록한다.
         turn.tool_calls.extend(ev.tool_calls)
         turn.tool_results += ev.tool_results
         turn.thinking_blocks += ev.thinking_blocks
@@ -1388,12 +1388,12 @@ def build_timeline(session):
 
 
 # ---------------------------------------------------------------------------
-# Text helpers
+# 텍스트 헬퍼
 # ---------------------------------------------------------------------------
 
 
 def preview(text, width=60):
-    """One-line, bounded preview of a prompt."""
+    """프롬프트의 길이가 제한된 한 줄 미리보기."""
     if not text:
         return "(no prompt found)"
     flat = " ".join(str(text).split())
@@ -1405,7 +1405,7 @@ def preview(text, width=60):
 
 
 def choose_fence(text):
-    """Pick a Markdown fence longer than any fence already inside ``text``."""
+    """``text`` 안에 이미 있는 어떤 펜스보다 긴 Markdown 펜스를 고른다."""
     longest = 0
     for line in (text or "").splitlines():
         match = re.match(r"\s*(`{3,})", line)
@@ -1423,7 +1423,7 @@ _NO_WRAP_PREFIXES = ("    ", "\t", "|", "#", ">", "-", "*", "+", "=")
 
 
 def wrap_prose(text, width=88):
-    """Soft-wrap prose while leaving fenced/indented/table lines verbatim."""
+    """산문을 소프트 랩하되 펜스/들여쓰기/표 줄은 원문 그대로 둔다."""
     if not text:
         return ""
     lines = []
@@ -1450,13 +1450,13 @@ def indent_block(text, prefix):
 def terminal_width(default=80):
     try:
         cols = shutil.get_terminal_size(fallback=(default, 24)).columns
-    except Exception:  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - 방어적 예외 처리
         cols = default
     return max(60, min(100, cols))
 
 
 # ---------------------------------------------------------------------------
-# Markdown rendering
+# Markdown 렌더링
 # ---------------------------------------------------------------------------
 
 
@@ -1513,7 +1513,7 @@ def _session_header_rows(session, raw, home):
 
 
 def render_markdown(session, raw=False, home=None, width=88):
-    """Render a session as Markdown."""
+    """세션을 Markdown으로 렌더링한다."""
     spec = provider_of(session.provider)
     lines = []
     lines.append("# %s Session — %s" % (spec.label, TITLE))
@@ -1597,7 +1597,7 @@ def render_markdown(session, raw=False, home=None, width=88):
 
 
 # ---------------------------------------------------------------------------
-# HTML rendering
+# HTML 렌더링
 # ---------------------------------------------------------------------------
 
 CSP = (
@@ -1749,7 +1749,7 @@ def _status_class(turn):
 
 
 def render_html(session, raw=False, home=None):
-    """Render a session as a self-contained, offline HTML document."""
+    """세션을 자기 완결적인 오프라인 HTML 문서로 렌더링한다."""
     out = []
     add = out.append
     spec = provider_of(session.provider)
@@ -1761,8 +1761,8 @@ def render_html(session, raw=False, home=None):
     add("<head>")
     add('<meta charset="utf-8">')
     add('<meta name="viewport" content="width=device-width, initial-scale=1">')
-    # CSP is a fixed constant with no HTML-special characters, so it is emitted
-    # verbatim (escaping it would only obscure the policy in the source view).
+    # CSP는 HTML 특수 문자가 없는 고정 상수이므로 그대로 출력한다
+    # (이스케이프하면 소스 보기에서 정책을 알아보기 어렵게 만들 뿐이다).
     add('<meta http-equiv="Content-Security-Policy" content="%s">' % CSP)
     add('<meta name="referrer" content="no-referrer">')
     add("<title>%s — %s</title>" % (esc(TITLE), esc(heading)))
@@ -1891,12 +1891,12 @@ def render_html(session, raw=False, home=None):
 
 
 # ---------------------------------------------------------------------------
-# Discovery and selection
+# 검색 및 선택
 # ---------------------------------------------------------------------------
 
 
 def default_root():
-    """Legacy helper: the Claude default root (kept for compatibility)."""
+    """호환성을 위해 유지하는 기존 helper로, Claude 기본 root를 반환한다."""
     return default_root_for(PROVIDER_CLAUDE)
 
 
@@ -1911,7 +1911,7 @@ def find_transcript_paths(root):
 
 
 def find_sessions(root):
-    """Load every transcript under ``root`` (recursive), newest file first."""
+    """``root`` 아래의 모든 transcript를 재귀적으로 최신 파일부터 로드한다."""
     if not os.path.isdir(root):
         raise TranscriptError("Root not found or not a directory: %s" % root)
     sessions = []
@@ -1925,7 +1925,7 @@ def find_sessions(root):
 
 
 def find_sessions_for(provider, root):
-    """Load every session of ``provider`` at ``root`` (newest first)."""
+    """``root``에 있는 ``provider``의 모든 session을 최신순으로 로드한다."""
     if provider == PROVIDER_HERMES:
         path = str(root)
         if os.path.isdir(path):
@@ -1951,10 +1951,10 @@ def find_sessions_for(provider, root):
 
 
 def find_sessions_multi(roots):
-    """Load sessions for an ordered ``{provider: root}`` mapping.
+    """정렬된 ``{provider: root}`` mapping의 session을 로드한다.
 
-    Returns ``(sessions, notes)``; ``notes`` records roots that could not be
-    scanned so the caller can report them without failing the whole run.
+    ``(sessions, notes)``를 반환한다. ``notes``에는 scan할 수 없었던 root를
+    기록하여 호출자가 전체 실행을 실패시키지 않고 이를 보고할 수 있게 한다.
     """
     sessions = []
     notes = []
@@ -1976,7 +1976,7 @@ def _selector_candidates(sessions):
 
 
 def resolve_selector(sessions, selector):
-    """Resolve ``[provider:]partial-id`` to exactly one session."""
+    """``[provider:]partial-id``를 정확히 하나의 session으로 해석한다."""
     raw = (selector or "").strip()
     if not raw:
         raise SelectorError("Empty session selector.")
@@ -2058,8 +2058,8 @@ def _resolved_destination(out, home=None, source_paths=None, require_parent=Fals
         text = os.path.join(home_dir, text[2:])
     expanded = os.path.abspath(text)
 
-    # Guard both the caller-supplied home (tests, unusual setups) and the real
-    # one, for every provider, following symlinks on each.
+    # 각 provider에서 symlink를 따라가며 호출자가 제공한 home(테스트나 특수 설정)과
+    # 실제 home을 모두 보호한다.
     guards = []
     for base in (home_dir, os.path.abspath(os.path.expanduser("~"))):
         for pid in PROVIDER_IDS:
@@ -2112,7 +2112,7 @@ def _resolved_destination(out, home=None, source_paths=None, require_parent=Fals
 
 
 def validate_out_path(out, home=None, source_paths=None):
-    """Resolve ``out`` and reject provider stores and loaded source inodes."""
+    """``out``을 해석하고 provider 저장소 및 로드된 source inode를 거부한다."""
     return _resolved_destination(out, home=home, source_paths=source_paths)[0]
 
 
@@ -2146,7 +2146,7 @@ def write_output_atomic(
     source_inodes=None,
     expected_parent_identity=None,
 ):
-    """Write a secure 0600 export without truncating the destination inode."""
+    """대상 inode를 truncate하지 않고 안전한 0600 export를 쓴다."""
     parent = os.path.dirname(out_path) or "."
     name = os.path.basename(out_path)
     directory_flags = (
@@ -2187,7 +2187,7 @@ def write_output_atomic(
                 break
             except FileExistsError:
                 continue
-        else:  # pragma: no cover - improbable temporary-name collision storm
+        else:  # pragma: no cover - 발생 가능성이 희박한 임시 이름 충돌 반복
             raise OSError("cannot allocate a temporary export file")
 
         try:
@@ -2304,7 +2304,7 @@ def write_output_atomic(
 
 
 # ---------------------------------------------------------------------------
-# Terminal output
+# 터미널 출력
 # ---------------------------------------------------------------------------
 
 
@@ -2313,7 +2313,7 @@ class Style(object):
         self.enabled = False
         try:
             self.enabled = bool(stream.isatty()) and os.environ.get("NO_COLOR") is None
-        except Exception:  # pragma: no cover - defensive
+        except Exception:  # pragma: no cover - 방어적 예외 처리
             self.enabled = False
 
     def _wrap(self, code, text):
@@ -2330,14 +2330,14 @@ class Style(object):
 
 
 class ProviderSelectionError(Exception):
-    """Raised when --provider / --root are combined in a way we cannot honour."""
+    """지원할 수 없는 방식으로 --provider와 --root를 조합했을 때 발생한다."""
 
 
 def resolve_provider_roots(args):
-    """Return an ordered ``{provider: root}`` mapping for this invocation.
+    """이번 호출에 사용할 정렬된 ``{provider: root}`` mapping을 반환한다.
 
-    Backward compatibility: an explicit ``--root`` with no ``--provider`` means
-    Claude, exactly as before providers existed.
+    하위 호환성을 위해 ``--provider`` 없이 명시한 ``--root``는 provider 도입
+    이전과 정확히 동일하게 Claude를 뜻한다.
     """
     explicit_root = bool(getattr(args, "root_explicit", False))
     provider = getattr(args, "provider", None)
@@ -2390,7 +2390,7 @@ def _report_notes(notes):
 
 
 def _gather(args):
-    """Return ``(sessions, notes, roots, exit_code)``; sessions is None on error."""
+    """``(sessions, notes, roots, exit_code)``를 반환하며, 오류 시 sessions는 None이다."""
     try:
         roots = resolve_provider_roots(args)
     except ProviderSelectionError as exc:
@@ -2398,8 +2398,8 @@ def _gather(args):
         return None, [], {}, 2
     sessions, notes = find_sessions_multi(roots)
     if not sessions:
-        # A single, explicitly chosen provider whose root cannot be read at all
-        # is a hard error; when aggregating, an unreadable root is only a note.
+        # 명시적으로 선택한 단일 provider의 root를 전혀 읽을 수 없으면 치명적
+        # 오류이며, 여러 provider를 집계할 때 읽을 수 없는 root는 알림에 그친다.
         if notes and len(roots) == 1:
             sys.stderr.write("error: %s\n" % notes[0])
             return None, notes, roots, 2
@@ -2475,10 +2475,10 @@ def cmd_list(args, style):
                 rel = os.path.relpath(session.path, root)
                 if rel not in (".", "") and not rel.startswith(".."):
                     location = rel
-            except ValueError:  # pragma: no cover - different drives on Windows
+            except ValueError:  # pragma: no cover - Windows의 서로 다른 드라이브
                 pass
         elif root:
-            # A file-rooted provider (Hermes): name the database, not "."
+            # 파일을 root로 삼는 provider(Hermes)는 "."이 아니라 database 이름을 표시한다.
             location = os.path.basename(session.path) or location
         notes_row = ["select: %s" % session.qualified_id]
         if session.session_id_from_filename:
@@ -2509,7 +2509,7 @@ def cmd_list(args, style):
 
 
 def _load_selected(args):
-    """Return (session, exit_code). ``session`` is None when the code is set."""
+    """(session, exit_code)를 반환하며, code가 설정된 경우 ``session``은 None이다."""
     sessions, notes, _roots, code = _gather(args)
     if sessions is None:
         return None, code
@@ -2735,13 +2735,13 @@ def cmd_export(args, style):
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# 명령줄 인터페이스
 # ---------------------------------------------------------------------------
 
 
 class _RootAction(argparse.Action):
-    """Record that ``--root`` was supplied, so the legacy meaning is kept:
-    an explicit --root with no --provider means Claude."""
+    """기존 의미를 유지하도록 ``--root``가 제공되었음을 기록한다.
+    --provider 없이 명시한 --root는 Claude를 뜻한다."""
 
     def __call__(self, parser, namespace, values, option_string=None):
         setattr(namespace, self.dest, values)
@@ -2799,7 +2799,7 @@ def _add_common(parser):
 
 
 def build_parser():
-    """Build the read-only session viewer command tree."""
+    """읽기 전용 session viewer 명령 tree를 구성한다."""
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
         description="%s — read-only viewer for local AI coding sessions: "
@@ -2852,7 +2852,7 @@ def build_parser():
 
 
 def main(argv=None):
-    """Dispatch a session-viewer command and return a process exit status."""
+    """session-viewer 명령을 전달하고 프로세스 종료 상태를 반환한다."""
     parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if not getattr(args, "command", None):
@@ -2872,7 +2872,7 @@ def main(argv=None):
     }
     try:
         return handlers[args.command](args, style)
-    except BrokenPipeError:  # pragma: no cover - piping into head etc.
+    except BrokenPipeError:  # pragma: no cover - head 등으로 파이프 연결할 때
         return 0
     except KeyboardInterrupt:  # pragma: no cover
         sys.stderr.write("interrupted\n")

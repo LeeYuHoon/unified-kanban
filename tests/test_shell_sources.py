@@ -1,10 +1,9 @@
-"""The shell syntax gate must cover every shell file this repository ships.
+"""shell 구문 게이트는 이 저장소가 배포하는 모든 shell 파일을 검사해야 한다.
 
-The gate used to name its files by hand, so shipped shell sources such as
-``bin/ai-session-viewer`` and ``integrations/session-viewer/setup.sh`` were
-never parsed by CI at all.
-A hand-written list drifts silently every time a script is added, so discovery
-now comes from the repository itself and these tests hold that property.
+게이트가 예전에는 파일을 수동으로 나열했기 때문에 ``bin/ai-session-viewer``와
+``integrations/session-viewer/setup.sh`` 같은 배포 shell 소스는 CI에서 전혀
+파싱되지 않았다. 수동 목록은 스크립트가 추가될 때마다 조용히 실제 상태와
+어긋나므로, 이제 저장소 자체에서 파일을 탐색하며 이 테스트들이 그 속성을 지킨다.
 """
 
 from __future__ import annotations
@@ -21,8 +20,8 @@ REPO = Path(__file__).resolve().parents[1]
 ENUMERATOR = REPO / "scripts" / "list-shell-sources.py"
 WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 SHELL_SUFFIXES = (".sh", ".bash")
-# The exact sources the published gate was missing. Named explicitly so the
-# reported defect stays covered even if discovery is rewritten again.
+# 배포된 게이트에서 정확히 누락됐던 소스다. 탐색 로직이 다시 작성되더라도 보고된
+# 결함을 계속 검증하도록 명시적으로 나열한다.
 PREVIOUSLY_UNCOVERED = (
     "bin/ai-session-viewer",
     "integrations/session-viewer/setup.sh",
@@ -38,7 +37,7 @@ def load_enumerator():
 
 
 def discovered() -> dict[str, str]:
-    """Return the gate's own discovery, as ``path -> syntax checker``."""
+    """게이트 자체의 탐색 결과를 ``경로 -> 구문 검사기`` 형태로 반환한다."""
     completed = subprocess.run(
         [sys.executable, str(ENUMERATOR)],
         cwd=REPO,
@@ -57,10 +56,10 @@ def discovered() -> dict[str, str]:
 
 
 def walked() -> set[str]:
-    """Discover shell sources by walking the tree, independent of ``git ls-files``.
+    """``git ls-files``와 독립적으로 트리를 순회하여 shell 소스를 찾는다.
 
-    A file that exists, is not ignored, and reads as shell must be gated even if
-    it never made it into the index - the missing wrapper was exactly that.
+    존재하고 무시 대상이 아니며 shell로 읽히는 파일은 인덱스에 들어간 적이 없어도
+    게이트 검사를 받아야 한다. 누락된 래퍼가 정확히 그런 경우였다.
     """
     if not (REPO / ".git").exists():
         pytest.skip("the independent completeness oracle requires a Git checkout")
@@ -127,7 +126,7 @@ def test_enumerator_covers_the_sources_the_published_gate_missed() -> None:
 
 
 def test_every_discovered_shell_source_parses() -> None:
-    """Run the gate locally, so CI drift cannot be the only thing that catches it."""
+    """CI와의 차이만으로 문제를 잡는 일이 없도록 게이트를 로컬에서 실행한다."""
     for path, interpreter in sorted(discovered().items()):
         completed = subprocess.run(
             [interpreter, "-n", path], cwd=REPO, capture_output=True, text=True, check=False
@@ -167,7 +166,7 @@ def test_interpreter_classification(first_line: str, name: str, expected: str | 
 
 
 def test_unsupported_shell_dialect_fails_closed() -> None:
-    """A dialect with no configured checker must stop the gate, not slip past it."""
+    """검사기가 설정되지 않은 방언은 게이트를 통과하지 말고 중단시켜야 한다."""
     enumerator = load_enumerator()
 
     with pytest.raises(SystemExit, match="zsh"):

@@ -1,4 +1,4 @@
-"""Command-line interface for explicit Unified Kanban card mutations."""
+"""명시적인 Unified Kanban 카드 변경을 위한 명령줄 인터페이스."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ _BOARD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 def _bind_user_data_options(argv: Sequence[str]) -> list[str]:
-    """Bind the next token as data even when it starts with a hyphen."""
+    """다음 토큰이 하이픈으로 시작하더라도 데이터로 바인딩한다."""
     normalized: list[str] = []
     index = 0
     raw = list(argv)
@@ -38,7 +38,7 @@ def _bind_user_data_options(argv: Sequence[str]) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the adapter parser without reading process-global arguments."""
+    """프로세스 전역 인자를 읽지 않고 어댑터 파서를 구성한다."""
     parser = argparse.ArgumentParser(prog="kanban-adapter")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -54,8 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--board")
     update.add_argument("--task", required=True)
     update.add_argument("--message", required=True)
-    # Optional: when given, the comment is appended only if the card does not
-    # already carry this marker, so a retried post cannot duplicate it.
+    # 선택 사항: 지정되면 카드가 이 마커를 아직 가지고 있지 않을 때에만
+    # 댓글이 추가되므로, 재시도된 게시가 댓글을 중복시킬 수 없다.
     update.add_argument("--idempotency-key", dest="idempotency_key")
 
     done = sub.add_parser("done")
@@ -79,7 +79,7 @@ def main(
     backend: Any | None = None,
     compatibility_check: Callable[[], tuple[bool, str]] = check_hermes_compatibility,
 ) -> int:
-    """Execute one adapter command and return a stable process exit status."""
+    """어댑터 명령 하나를 실행하고 안정적인 프로세스 종료 상태를 반환한다."""
     raw_argv = sys.argv[1:] if argv is None else argv
     args = build_parser().parse_args(_bind_user_data_options(raw_argv))
     if backend is None:

@@ -51,11 +51,11 @@ jobs:
       - name: Check whitespace
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
 
-  # Real release production needs a local Hermes object database holding the
-  # reviewed pin, so it is opt-in rather than part of every pull request: the
-  # pin can stop being reachable from upstream `main` for reasons that have
-  # nothing to do with the change under review. The local release-candidate
-  # gate in docs/maintenance.md runs the same test and is the binding one.
+  # 실제 release 생성에는 검토한 pin이 들어 있는 로컬 Hermes object database가 필요합니다.
+  # upstream `main`에서 pin이 사라지는 일은 현재 변경과 무관하게 생길 수 있으므로,
+  # 모든 pull request에서 실행하지 않고 필요할 때만 직접 실행합니다.
+  # docs/maintenance.md의 로컬 release 후보 검사는 같은 테스트를 실행하며,
+  # 최종 판정에는 그 결과를 사용합니다.
   release-integration:
     name: Real release production on macOS
     if: github.event_name == 'workflow_dispatch'

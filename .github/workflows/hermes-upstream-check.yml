@@ -2,7 +2,7 @@ name: Hermes upstream compatibility
 
 on:
   schedule:
-    # 03:00 KST (Korea has no daylight-saving time).
+    # 한국은 일광 절약 시간을 쓰지 않으므로 한국 표준시 오전 3시에 실행합니다.
     - cron: "0 18 * * *"
   workflow_dispatch:
 

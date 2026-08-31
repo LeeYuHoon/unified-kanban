@@ -597,7 +597,7 @@ def test_operation_receipt_rollback_undoes_an_uncheckpointed_replacement(
 
         assert managed.read_text(encoding="utf-8") == "before"
         assert not operation.exists()
-        # The manifest is still the caller's rollback authority afterwards.
+    # 이후에도 매니페스트는 호출자의 롤백 권한으로 남는다.
         assert receipt.exists()
         helper.rollback_from_ledger(receipt, ledger_fd)
     finally:
@@ -640,7 +640,7 @@ def test_operation_receipt_rollback_preserves_foreign_successor(
 def test_operation_receipt_rollback_leaves_checkpointed_work_to_the_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stage receipt that outlived its checkpoint must not restore twice."""
+    """체크포인트보다 오래 남은 스테이지 영수증이 두 번 복원해서는 안 된다."""
     helper = load_helper()
     receipt = tmp_path / "receipt.json"
     operation = tmp_path / "stage-1.json"
@@ -2053,8 +2053,8 @@ def test_replace_file_checkpoint_rejects_mode_change(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="file mode changed"):
         helper.checkpoint(receipt, operation, token)
 
-    # The mode mutation makes the published inode a foreign successor. The
-    # transaction must not remove it merely to recover the old baseline.
+    # 모드 변경으로 게시된 inode는 외부 후속 객체가 된다. 트랜잭션은 이전 기준
+    # 상태를 복구한다는 이유만으로 이를 제거해서는 안 된다.
     assert target.read_text(encoding="utf-8") == "new"
     assert target.stat().st_mode & 0o777 == 0o640
     assert receipt.exists()

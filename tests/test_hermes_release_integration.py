@@ -1,25 +1,24 @@
-"""End-to-end release production against the real reviewed upstream and bundle.
+"""실제로 검토된 업스트림과 번들을 대상으로 하는 릴리스 생산 종단 간 테스트.
 
-Every other release test builds from a synthetic three-commit repository, so
-nothing in the fast suite ever saw the real upstream tree - which is exactly why
-a case-fold collision that only exists upstream survived review and broke the
-primary install path on a supported macOS volume.
+다른 모든 릴리스 테스트는 합성한 3개 커밋 저장소에서 빌드하므로 빠른 테스트 모음은
+실제 업스트림 트리를 전혀 확인하지 않았다. 바로 그 때문에 업스트림에만 존재하는
+대소문자 접기 충돌이 검토에서 걸러지지 않고 지원되는 macOS 볼륨의 기본 설치
+경로를 망가뜨렸다.
 
-This module drives the real producer instead: the reviewed pin served from a real
-Hermes object database, the reviewed carried bundle from ``patches/``, the real
-carried-bundle verifier, and the real managed launcher. Only the dependency
-installer is controlled - resolving Hermes' full dependency tree is a network
-download with no bearing on what this proves - and the source checkout,
-materialization, receipt, verifier, and launcher are all the shipped code.
+대신 이 모듈은 실제 생산자를 구동한다. 실제 Hermes 객체 데이터베이스에서 제공한
+검토된 핀, ``patches/``의 검토된 반입 번들, 실제 반입 번들 검증기, 실제 관리형
+실행기를 사용한다. Hermes의 전체 의존성 트리를 해석하는 작업은 이 테스트의 입증
+대상과 무관한 네트워크 다운로드이므로 의존성 설치기만 통제하며, 소스 체크아웃,
+구체화, 영수증, 검증기, 실행기는 모두 배포되는 코드를 사용한다.
 
-Opt in by pointing ``UNIFIED_KANBAN_TEST_HERMES_SOURCE`` at any Git repository
-whose object database holds the reviewed upstream commit, for example::
+검토된 업스트림 커밋을 객체 데이터베이스에 보유한 Git 저장소를
+``UNIFIED_KANBAN_TEST_HERMES_SOURCE``로 지정하여 선택적으로 실행한다. 예::
 
     git clone --bare --no-tags --single-branch https://github.com/NousResearch/hermes-agent.git /tmp/hermes-source.git
     UNIFIED_KANBAN_TEST_HERMES_SOURCE=/tmp/hermes-source.git uv run pytest tests/test_hermes_release_integration.py
 
-Set ``UNIFIED_KANBAN_TEST_HERMES_REQUIRED=1`` to turn the opt-out skip into a
-failure, so a release gate cannot pass by quietly skipping this file.
+``UNIFIED_KANBAN_TEST_HERMES_REQUIRED=1``을 설정하면 선택 해제에 따른 건너뛰기를
+실패로 바꾸어, 릴리스 게이트가 이 파일을 조용히 건너뛰고 통과하지 못하게 한다.
 """
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ def reviewed_pins() -> tuple[str, str]:
 
 
 def unavailable(reason: str) -> None:
-    """Skip, unless this run declared that the integration must really happen."""
+    """이번 실행에서 통합 테스트가 반드시 수행되어야 한다고 선언하지 않았다면 건너뛴다."""
     if os.environ.get(REQUIRED_VARIABLE) == "1":
         pytest.fail(f"{REQUIRED_VARIABLE}=1 but {reason}")
     pytest.skip(reason)
@@ -74,13 +73,12 @@ def unavailable(reason: str) -> None:
 
 @pytest.fixture(scope="module")
 def pinned_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Serve the reviewed pin from a real object database without mutating it.
+    """실제 객체 데이터베이스를 변경하지 않고 검토된 핀을 제공한다.
 
-    The producer refuses to build unless ``refs/heads/main`` is exactly the
-    reviewed upstream, and the official branch has moved well past it. Borrowing
-    the caller's objects through ``alternates`` gives that exact ref view while
-    leaving the donated repository - which may be someone's working clone -
-    untouched.
+    생산자는 ``refs/heads/main``이 검토된 업스트림과 정확히 일치하지 않으면 빌드를
+    거부하며 공식 브랜치는 이미 그 지점을 훨씬 지나갔다. ``alternates``를 통해
+    호출자의 객체를 빌리면 정확히 그 참조 뷰를 제공하면서 누군가의 작업용 복제본일
+    수도 있는 제공 저장소는 건드리지 않을 수 있다.
     """
     upstream, _ = reviewed_pins()
     configured = os.environ.get(SOURCE_VARIABLE)
@@ -126,11 +124,10 @@ def pinned_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture
 def release_workspace(tmp_path: Path):
-    """Yield a Hermes checkout path and remove its release root afterwards.
+    """Hermes 체크아웃 경로를 제공하고 이후 릴리스 루트를 제거한다.
 
-    One real release is roughly three quarters of a gigabyte, and pytest keeps
-    recent temporary trees around, so this cleans up rather than leaving several
-    copies behind.
+    실제 릴리스 하나는 약 0.75기가바이트이고 pytest는 최근 임시 트리를 보존하므로,
+    여러 복사본을 남기는 대신 정리한다.
     """
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
@@ -141,11 +138,11 @@ def release_workspace(tmp_path: Path):
 
 
 def controlled_uv(tmp_path: Path) -> Path:
-    """Stand in for the dependency installer, and only for that.
+    """의존성 설치기만을 대체한다.
 
-    It creates the same artefact a locked sync creates - a real executable at the
-    release-local ``venv/bin/hermes`` - so the launcher, the selector, and the
-    executable gate downstream are all exercised for real.
+    잠금 동기화가 만드는 것과 같은 산출물, 즉 릴리스 로컬 경로
+    ``venv/bin/hermes``에 실제 실행 파일을 만든다. 따라서 이후의 실행기, 선택자,
+    실행 파일 게이트는 모두 실제로 검증된다.
     """
     uv = tmp_path / "uv"
     uv.write_text(
@@ -180,7 +177,7 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
 
     assert release == layout.release
     assert release.parent == layout.root
-    # The producer must never touch the mutable Hermes checkout it builds beside.
+    # 생산자는 옆에 릴리스를 빌드하는 동안 변경 가능한 Hermes 체크아웃을 절대 건드리면 안 된다.
     assert list(release_workspace.iterdir()) == []
 
     receipt_path = release / helper._COMPLETION_RECEIPT
@@ -202,9 +199,9 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         release, excluded_top_level={".git", helper._COMPLETION_RECEIPT}
     )
 
-    # The reviewed upstream really does carry a folded metadata pair, so an empty
-    # record here would mean the detector stopped seeing the very thing it exists
-    # for rather than that upstream got tidier.
+    # 검토된 업스트림에는 실제로 접을 때 충돌하는 메타데이터 쌍이 있으므로 여기의
+    # 빈 레코드는 업스트림이 정리됐다는 뜻이 아니라, 탐지기가 존재 목적인 바로 그
+    # 대상을 더 이상 찾지 못한다는 뜻이다.
     collisions = receipt["case_collisions"]
     assert collisions, "the reviewed upstream tree carries a case-fold collision"
     for record in collisions:
@@ -223,8 +220,8 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         ]
         assert survivors == [record["representative"].rpartition("/")[2]]
 
-    # Nothing beyond the predicted normalization and this project's own untracked
-    # output may appear in the constructed worktree.
+    # 예측된 정규화와 이 프로젝트 자체의 미추적 출력 외에는 생성된 작업 트리에
+    # 어떤 것도 나타나서는 안 된다.
     expected = helper._expected_collision_status(
         helper.case_collisions(release, "HEAD"),
         helper._materialized_case_collisions(
@@ -248,7 +245,7 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
     )
     assert helper._BYTECODE_FINGERPRINT in ignored
 
-    # The real carried-bundle verifier, run against the produced release.
+    # 생산된 릴리스를 대상으로 실제 반입 번들 검증기를 실행한다.
     verified = subprocess.run(
         [sys.executable, str(VERIFIER), "--hermes-repo", str(release)],
         capture_output=True,
@@ -258,14 +255,13 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
     assert verified.returncode == 0, verified.stderr
     assert verified.stdout.startswith("CARRIED_BUNDLE_PASS ")
 
-    # The managed launcher must reach the release-local executable through the
-    # selector, and only through it.
+    # 관리형 실행기는 선택자를 통해서만 릴리스 로컬 실행 파일에 도달해야 한다.
     launcher = tmp_path / "hermes"
     layout.selector.write_bytes(helper.selector_payload(layout))
     launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
     launcher.chmod(0o755)
-    # The gate every Hermes turn and adapter command runs before recording
-    # anything must accept this produced release, receipt included.
+    # 모든 Hermes 턴과 어댑터 명령이 무엇이든 기록하기 전에 실행하는 게이트는
+    # 영수증을 포함한 이 생산된 릴리스를 받아들여야 한다.
     assert check_selected_release(release_workspace, upstream, carried) == ""
     launched = subprocess.run(
         [str(launcher), "gateway"], capture_output=True, text=True, check=False
@@ -276,14 +272,14 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         helper.launcher_baseline(layout, launcher.read_bytes()) == helper.BASELINE_ABSENT
     )
 
-    # A second run must reuse the receipted release rather than rebuild it, and
-    # must not need the dependency installer at all.
+    # 두 번째 실행은 영수증이 있는 릴리스를 다시 빌드하지 않고 재사용해야 하며,
+    # 의존성 설치기가 전혀 필요하지 않아야 한다.
     identity = release.stat().st_ino
     assert helper.prepare_release(layout, uv=tmp_path / "absent-uv", **build) == release
     assert release.stat().st_ino == identity
 
-    # Rewriting the normalized survivor must fail the reuse verification, and
-    # restoring its reviewed bytes must make the release trustworthy again.
+    # 정규화 후 남은 파일을 다시 쓰면 재사용 검증이 실패해야 하며, 검토된 바이트를
+    # 복원하면 릴리스를 다시 신뢰할 수 있어야 한다.
     survivor = release / collisions[0]["representative"]
     original = survivor.read_bytes()
     survivor.write_bytes(b"attacker\n")
@@ -294,7 +290,7 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
 
 
 def test_reviewed_bundle_matches_its_recorded_integrity_metadata() -> None:
-    """The producer's inputs are the shipped ones, checked without any network."""
+    """생산자의 입력이 배포본 그대로인지 네트워크 없이 검사한다."""
     verified = subprocess.run(
         [sys.executable, str(VERIFIER)], capture_output=True, text=True, check=False
     )

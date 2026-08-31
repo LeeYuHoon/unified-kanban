@@ -1,4 +1,4 @@
-"""Directory-FD based private file capabilities used by hook state machines."""
+"""hook 상태 머신이 사용하는 디렉터리 FD 기반 private 파일 capability."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ def _directory_flags() -> int:
 
 
 def open_directory(path: Path, *, create: bool = False, mode: int = 0o700) -> int:
-    """Open an absolute directory one non-symlink component at a time."""
+    """절대 경로 디렉터리를 심볼릭 링크가 아닌 구성 요소 단위로 하나씩 연다."""
     path = Path(path)
     if not path.is_absolute():
         raise ValueError("private directory must be absolute")
     parts = path.parts
-    # Darwin exposes these stable system aliases as root-level symlinks. Map
-    # them to their canonical namespace before traversal rather than following
-    # a symlink component with openat(). User-controlled symlinks remain fatal.
+    # Darwin은 이 안정적인 시스템 별칭들을 루트 수준 심볼릭 링크로 노출한다.
+    # openat()으로 심볼릭 링크 구성 요소를 따라가는 대신, 순회 전에 정식
+    # 네임스페이스로 매핑한다. 사용자가 제어하는 심볼릭 링크는 여전히 치명적 오류다.
     if sys.platform == "darwin" and len(parts) > 1 and parts[1] in {"var", "tmp", "etc"}:
         parts = (os.sep, "private", *parts[1:])
     fd = os.open(parts[0], _directory_flags())
@@ -70,7 +70,7 @@ def _open_parent(path: Path) -> int:
 
 @dataclass
 class Receipt:
-    """Open ownership/CAS receipt pinning both a directory and regular inode."""
+    """디렉터리와 일반 파일 inode를 모두 고정하는 열린 소유권/CAS receipt."""
 
     directory_fd: int
     file_fd: int
@@ -107,7 +107,7 @@ class Receipt:
 
 
 class CommittedPublicationError(RuntimeError):
-    """Publication installed a new inode but a post-install check failed."""
+    """publication이 새 inode를 설치했지만 설치 후 검사가 실패했다."""
 
     def __init__(self, message: str, receipt: Receipt) -> None:
         super().__init__(message)
@@ -115,7 +115,7 @@ class CommittedPublicationError(RuntimeError):
 
 
 class NamespaceAuthorityError(RuntimeError):
-    """A public canonical name could not be restored to a proven inode."""
+    """공개 정식(canonical) 이름을 검증된 inode로 복원할 수 없었다."""
 
 
 def _renameatx(directory_fd: int, source: str, destination: str, flags: int) -> None:
@@ -172,7 +172,7 @@ def _same_directory(first_fd: int, second_fd: int) -> bool:
 
 
 def validate_directory(path: Path, directory_fd: int) -> None:
-    """Require the retained directory to remain at its canonical pathname."""
+    """보유 중인 디렉터리가 정식 경로명에 그대로 남아 있을 것을 요구한다."""
     current = open_directory(path)
     try:
         if not _same_directory(current, directory_fd):
@@ -188,7 +188,7 @@ def _receipt(directory_fd: int, file_fd: int, name: str) -> Receipt:
 
 
 def _retire_name(receipt: Receipt, name: str) -> None:
-    """Remove exactly ``name`` through the receipt's retained directory FD."""
+    """receipt가 보유한 디렉터리 FD를 통해 정확히 ``name``만 제거한다."""
     _validate_receipt(receipt, name)
     retired = _random_name(f"{name}.retired")
     moved = False
@@ -217,11 +217,11 @@ def retire_expected(
     *,
     directory_fd: int | None = None,
 ) -> None:
-    """Retire a singly-linked inode using a retained receipt and directory."""
+    """보유 중인 receipt와 디렉터리를 사용해 링크가 하나뿐인 inode를 퇴역시킨다."""
     owned: Receipt | None = None
     if isinstance(expected, Receipt):
         receipt = expected
-    else:  # Compatibility for callers outside the hook transaction.
+    else:  # hook transaction 밖의 호출자를 위한 호환성 경로.
         parent = os.dup(directory_fd) if directory_fd is not None else _open_parent(path)
         try:
             fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
@@ -242,7 +242,7 @@ def retire_expected(
 
 
 def detach_expected(path: Path, expected: Receipt, *, directory_fd: int) -> Receipt:
-    """Move canonical state to a fresh private capability before a side effect."""
+    """부수 효과(side effect)에 앞서 정식 상태를 새 private capability로 옮긴다."""
     if not _same_directory(expected.directory_fd, directory_fd):
         expected.close()
         raise NamespaceAuthorityError("private file receipt belongs to a different directory")
@@ -268,7 +268,7 @@ def detach_expected(path: Path, expected: Receipt, *, directory_fd: int) -> Rece
 
 
 def restore_detached(path: Path, receipt: Receipt) -> Receipt:
-    """Restore detached state after the external operation failed."""
+    """외부 작업이 실패한 뒤 분리(detached)된 상태를 복원한다."""
     try:
         _validate_receipt(receipt, receipt.name)
         validate_directory(path.parent, receipt.directory_fd)
@@ -335,7 +335,7 @@ def restore_detached(path: Path, receipt: Receipt) -> Receipt:
 
 
 def discard_detached(receipt: Receipt) -> None:
-    """Delete a fresh private detached capability after external success."""
+    """외부 작업 성공 후 새로 분리된 private capability를 삭제한다."""
     try:
         _validate_receipt(receipt, receipt.name)
         os.unlink(receipt.name, dir_fd=receipt.directory_fd)
@@ -353,7 +353,7 @@ def create_private_text(
     label: str,
     directory_fd: int | None = None,
 ) -> tuple[Path, Receipt]:
-    """Create a fresh owner-only text file relative to a retained directory."""
+    """보유 중인 디렉터리를 기준으로 소유자 전용 텍스트 파일을 새로 만든다."""
     parent = os.dup(directory_fd) if directory_fd is not None else open_directory(directory)
     name = _random_name(label)
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -394,7 +394,7 @@ def create_anonymous_text(
     label: str,
     directory_fd: int | None = None,
 ) -> Receipt:
-    """Create, write, and unlink an owner-only inode retained only by its FD."""
+    """소유자 전용 inode를 생성·기록한 뒤 unlink하여 FD로만 보유한다."""
     parent = os.dup(directory_fd) if directory_fd is not None else open_directory(directory)
     name = _random_name(label)
     flags = (
@@ -439,7 +439,7 @@ def create_anonymous_text(
 
 
 def read_bytes(path: Path, *, directory_fd: int | None = None) -> tuple[bytes, Receipt]:
-    """Read a canonical singly-linked file while retaining parent and file FDs."""
+    """부모와 파일 FD를 보유한 채 링크가 하나뿐인 정식 파일을 읽는다."""
     parent = os.dup(directory_fd) if directory_fd is not None else _open_parent(path)
     fd = -1
     receipt: Receipt | None = None
@@ -470,7 +470,7 @@ def atomic_publish(
     expected_identity: Receipt | Identity | None = None,
     directory_fd: int | None = None,
 ) -> Receipt:
-    """Publish exclusively or CAS-replace a receipt-pinned canonical inode."""
+    """배타적으로 publish하거나 receipt로 고정된 정식 inode를 CAS 방식으로 교체한다."""
     parent = os.dup(directory_fd) if directory_fd is not None else _open_parent(path)
     staged_name = _random_name(f"{path.name}.staged")
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -511,10 +511,10 @@ def atomic_publish(
                 try:
                     _swap_names(parent, staged_name, path.name)
                 except OSError as error:
-                    # The canonical name is no longer proven to denote the
-                    # staged inode.  Do not expose an invalid committed
-                    # receipt, and let the identity-checked finally block
-                    # preserve every foreign entry.
+                    # 정식 이름이 staged inode를 가리킨다는 것이 더 이상
+                    # 증명되지 않는다.  유효하지 않은 committed receipt를
+                    # 노출하지 말고, identity를 검사하는 finally 블록이
+                    # 모든 외부(foreign) 항목을 보존하도록 한다.
                     committed = False
                     expected.close()
                     raise NamespaceAuthorityError(

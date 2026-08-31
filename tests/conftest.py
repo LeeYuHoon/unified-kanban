@@ -13,18 +13,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def clear_hermes_auxiliary_process_context(monkeypatch) -> None:
-    """Keep the parent-process test baseline stable inside delegated CI workers."""
+    """위임된 CI 워커 안에서도 부모 프로세스의 테스트 기준 상태를 안정적으로 유지한다."""
     monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
 
 
 @pytest.fixture
 def reviewed_release():
-    """Build the immutable release an installed host actually executes.
+    """설치된 호스트가 실제로 실행하는 불변 릴리스를 빌드한다.
 
-    The Hermes checkout is never moved onto the carried tip, so a realistic
-    fixture is a checkout at the reviewed upstream plus a sibling release root
-    holding one producer-receipted release and the selector that names it.
+    Hermes 체크아웃은 반입된 끝 커밋으로 절대 이동하지 않으므로, 현실적인
+    픽스처는 검토된 업스트림 상태의 체크아웃과, 생산자 영수증이 있는 릴리스
+    하나 및 그 릴리스를 가리키는 선택자를 담은 형제 릴리스 루트로 구성된다.
     """
     helper_path = ROOT / "scripts" / "hermes-release-manager.py"
     spec = importlib.util.spec_from_file_location("hermes_release_manager", helper_path)

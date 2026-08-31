@@ -1,11 +1,10 @@
-"""The runtime gate must validate the release that actually executes.
+"""런타임 게이트는 실제로 실행되는 릴리스를 검증해야 한다.
 
-The Hermes checkout is a read-only input: no flow ever moves its ``HEAD`` onto
-the carried tip, because the carried commits only exist inside the immutable
-release built from the reviewed bundle. These tests therefore keep the checkout
-at the reviewed upstream and never at the carried tip - exactly what a real
-installation looks like - and prove the gate decides on the selector, the
-release, and the producer's completion receipt.
+Hermes 체크아웃은 읽기 전용 입력이다. 반입된 커밋은 검토된 번들로 빌드한 불변
+릴리스 안에만 존재하므로 어떤 흐름도 체크아웃의 ``HEAD``를 반입된 끝 커밋으로
+이동하지 않는다. 따라서 이 테스트들은 실제 설치와 정확히 같이 체크아웃을 반입된
+끝 커밋이 아닌 검토된 업스트림에 유지하며, 게이트가 선택자와 릴리스 및 생산자의
+완료 영수증을 기준으로 판단함을 입증한다.
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ def _carried_manifest(tmp_path: Path, *commits: str) -> Path:
 
 
 def _carried_head(repo: Path, upstream: str) -> str:
-    """Return a carried tip that exists nowhere in the mutable checkout."""
+    """변경 가능한 체크아웃 어디에도 존재하지 않는 반입된 끝 커밋을 반환한다."""
     carried = "c0ffee" + upstream[6:]
     assert carried != upstream
     return carried

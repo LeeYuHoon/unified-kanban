@@ -39,15 +39,15 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual(kinds[12], csv_mod.KIND_COMPACTION)
 
     def test_content_shapes_string_list_and_block_dict(self):
-        # string content
+        # 문자열 콘텐츠
         self.assertEqual(
             self.session.events[0].text, "Refactor the JSONL parser, please."
         )
-        # list-of-blocks content
+        # 블록 목록 콘텐츠
         self.assertIn("Looking at the parser now.", self.session.events[1].text)
-        # single block dict content
+        # 단일 블록 딕셔너리 콘텐츠
         self.assertIn("Bearer", self.session.events[13].text)
-        # assistant with bare string content
+        # 일반 문자열 콘텐츠가 있는 어시스턴트
         self.assertEqual(self.session.events[18].text, "Rotated. Nothing else to do.")
 
     def test_missing_and_unknown_fields_are_safe(self):
@@ -62,7 +62,7 @@ class NormalizerTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"type": "user", "message": {"content": 12345}}) + "\n")
             fh.write(json.dumps({"type": "assistant", "message": None}) + "\n")
-            fh.write(json.dumps([1, 2, 3]) + "\n")  # top-level non-object
+            fh.write(json.dumps([1, 2, 3]) + "\n")  # 최상위 비객체
         s = csv_mod.load_session(path)
         self.assertEqual(len(s.events) + s.malformed_count, 3)
 
@@ -70,13 +70,13 @@ class NormalizerTests(unittest.TestCase):
         comp = self.session.events[12]
         self.assertEqual(comp.kind, csv_mod.KIND_COMPACTION)
         self.assertIn("condensed", comp.text)
-        # the summary text must not leak into the neighbouring assistant/user text
+        # 요약 텍스트가 인접한 어시스턴트/사용자 텍스트에 섞이면 안 된다.
         self.assertNotIn("condensed", self.session.events[11].text)
         self.assertNotIn("condensed", self.session.events[13].text)
         timeline = csv_mod.build_timeline(self.session)
         boundaries = [t for t in timeline if t.kind == csv_mod.KIND_COMPACTION]
         self.assertEqual(len(boundaries), 1)
-        # boundary sits between the turns it separates, in order
+        # 경계는 분리하는 두 턴 사이에 순서대로 위치한다.
         kinds = [t.kind for t in timeline]
         self.assertLess(kinds.index(csv_mod.KIND_COMPACTION), len(kinds) - 1)
 
@@ -99,7 +99,7 @@ class NormalizerTests(unittest.TestCase):
         self.assertTrue(s.session_id_from_filename)
 
     def test_streaming_reader_does_not_load_whole_file(self):
-        # iter_raw_records must be a generator (lazy), not a list builder
+        # iter_raw_records는 목록 생성기가 아니라 지연 실행 제너레이터여야 한다.
         gen = csv_mod.iter_raw_records(self.path)
         self.assertTrue(hasattr(gen, "__next__"))
         first = next(gen)

@@ -302,7 +302,7 @@ def _usage_message(
         payload["model"] = model
     for category in ("skills", "subagents", "mcp"):
         payload[category] = usage.get(category, {})
-    # Claude keeps the shared legacy header; only other sources are renamed.
+    # Claude는 공유 레거시 헤더를 유지하며, 다른 소스만 이름이 바뀐다.
     return "Agent tool usage\n" + json.dumps(
         payload, ensure_ascii=False, sort_keys=True
     )
@@ -846,12 +846,12 @@ def test_usage_comment_is_not_reposted_when_done_fails_then_retries(
 def test_usage_comment_is_not_duplicated_when_the_marker_write_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The crash window: the comment was appended, the marker never recorded.
+    """충돌 발생 구간: 주석은 추가됐지만 마커는 기록되지 않았다.
 
-    Local state cannot answer "did I already post?", so the retry must dedupe
-    on the card itself. This runs the real adapter CLI and backend against a
-    Hermes stand-in that remembers its comments, so the deterministic event id
-    is what has to prevent the duplicate.
+    로컬 상태만으로는 "이미 게시했는가?"에 답할 수 없으므로 재시도 시 카드
+    자체에서 중복을 제거해야 한다. 이 테스트는 주석을 기억하는 Hermes 대역을
+    상대로 실제 어댑터 CLI와 백엔드를 실행하므로, 결정적 이벤트 ID가 중복을
+    방지해야 한다.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -929,7 +929,7 @@ def test_usage_comment_is_not_duplicated_when_the_marker_write_fails(
             cache_dir=cache,
         )
 
-    # The comment went out, but nothing on disk remembers that it did.
+    # 주석은 전송됐지만 디스크에는 그 사실을 기억하는 정보가 없다.
     assert len(comments) == 1
     state = json.loads(next(cache.glob("*.json")).read_text("utf-8"))
     assert "usage_comment_posted" not in state

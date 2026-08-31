@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that launchd stably runs the exact program declared by a plist."""
+"""launchd가 plist에 선언된 바로 그 프로그램을 안정적으로 실행하는지 검증한다."""
 
 from __future__ import annotations
 

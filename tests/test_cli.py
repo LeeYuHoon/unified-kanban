@@ -142,7 +142,7 @@ def test_update_forwards_an_idempotency_key_when_given_one() -> None:
 
 
 def test_update_stays_key_free_when_none_is_given() -> None:
-    """Older callers keep the exact previous call shape."""
+    """이전 호출자는 기존 호출 형태를 정확히 유지한다."""
     backend = FakeBackend(resolved_board="shop-bridge")
 
     assert main([
@@ -259,8 +259,8 @@ def test_repository_bin_runs_without_package_install(
     home = tmp_path / "home"
     checkout = home / ".hermes/hermes-agent"
     checkout.mkdir(parents=True)
-    # The adapter runs the release the selector names; the checkout only ever
-    # supplies the reviewed upstream, so it is never at the carried tip.
+    # 어댑터는 선택자가 가리키는 릴리스를 실행한다. 체크아웃은 검토된 업스트림만
+    # 제공하므로 반입된 끝 커밋에 위치하는 일이 없다.
     reviewed_release(checkout, pin.lower(), carried_head.lower())
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

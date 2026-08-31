@@ -52,6 +52,7 @@ Unknown, malformed, or unverified compatibility must remain fail closed. Do not 
 ## Code and documentation style
 
 - Add a module docstring describing each non-trivial Python module's responsibility and trust boundary.
+- Write explanatory source comments and docstrings in Korean. Technical identifiers and tool directives such as `# noqa` may remain unchanged.
 - Document public APIs and non-obvious state transitions. Do not add comments that merely restate syntax.
 - Keep user data out of logs, tests, fixtures, screenshots, and commits.
 - Preserve fail-open behavior for observation hooks, but fail closed for compatibility and explicit management commands.

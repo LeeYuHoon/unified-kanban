@@ -1,4 +1,4 @@
-"""Normalize Codex hook payloads into the shared event state machine."""
+"""Codex hook 페이로드를 공유 이벤트 상태 머신 형식으로 정규화한다."""
 
 from __future__ import annotations
 
@@ -26,12 +26,13 @@ _EVENTS = frozenset(
 
 
 def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Map a Codex hook payload onto the shared hook vocabulary.
+    """Codex hook 페이로드를 공유 hook 어휘로 매핑한다.
 
-    Codex 0.145 emits snake_case names that already match; the camelCase and
-    legacy aliases are kept so older Codex builds keep working. ``tool_input``
-    is forwarded because the classifier needs it to name a tool, but nothing
-    downstream persists it; ``tool_response`` is never forwarded at all.
+    Codex 0.145는 이미 일치하는 snake_case 이름을 내보낸다; camelCase와
+    레거시 별칭은 더 오래된 Codex 빌드가 계속 동작하도록 유지된다.
+    ``tool_input``은 분류기가 도구 이름을 정하는 데 필요해서 전달되지만,
+    다운스트림 어디에서도 영속화되지 않는다; ``tool_response``는 아예
+    전달되지 않는다.
     """
     return {
         "session_id": _first_text(payload, "session_id", "sessionID", "sessionId", "id"),
@@ -59,11 +60,11 @@ def enrich_payload(
     *,
     state_db: Path | str | None | object = _UNSET,
 ) -> dict[str, Any]:
-    """Normalize a Codex payload and fill in ``model`` when the event omits it.
+    """Codex 페이로드를 정규화하고 이벤트에 ``model``이 없으면 채워 넣는다.
 
-    An explicit model in the hook payload always wins. The only fallback is the
-    model this exact session recorded in Codex's state database; there is no
-    machine-wide default, so an unreadable session leaves the model unset.
+    hook 페이로드에 명시된 모델이 항상 우선한다. 유일한 폴백은 바로 이
+    세션이 Codex의 state 데이터베이스에 기록한 모델이다; 머신 전역
+    기본값은 없으므로, 세션을 읽을 수 없으면 모델은 설정되지 않은 채로 남는다.
     """
     normalized = normalize_payload(payload)
     session_id = normalized.get("session_id")
@@ -89,7 +90,7 @@ def enrich_payload(
 
 
 def main(argv: Sequence[str] | None = None, *, stdin: TextIO | None = None) -> int:
-    """Read one Codex hook payload; observation failures remain fail open."""
+    """Codex hook 페이로드 하나를 읽는다; observation 실패는 계속 fail open으로 남는다."""
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 1 or args[0] not in _EVENTS:
         print(

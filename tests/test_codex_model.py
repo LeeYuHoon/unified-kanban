@@ -36,7 +36,7 @@ def make_state_db(path: Path, rows: list[tuple[str, str | None]]) -> Path:
 
 
 def make_config(path: Path, body: str) -> Path:
-    """A ``config.toml`` beside the database, purely to prove it is ignored."""
+    """무시된다는 사실만 입증하기 위해 데이터베이스 옆에 둔 ``config.toml``."""
     path.write_text(body, encoding="utf-8")
     return path
 
@@ -51,7 +51,7 @@ def test_session_model_comes_from_the_exact_session_row(tmp_path: Path) -> None:
 def test_missing_session_row_resolves_to_none_not_a_machine_default(
     tmp_path: Path,
 ) -> None:
-    """A config default is not this session's model, so it is never used."""
+    """설정 기본값은 이 세션의 모델이 아니므로 절대 사용하지 않는다."""
     db = make_state_db(tmp_path / "state_5.sqlite", [("other", "gpt-5.6-sol")])
     make_config(tmp_path / "config.toml", 'model = "gpt-5.6-terra"\n')
 
@@ -66,7 +66,7 @@ def test_null_session_model_resolves_to_none(tmp_path: Path) -> None:
 
 
 def test_config_toml_is_never_opened(tmp_path: Path, monkeypatch) -> None:
-    """No TOML fallback survives -- not the API, and not a stray read."""
+    """API든 뜻하지 않은 읽기든 어떤 TOML 대체 경로도 남지 않는다."""
     db = make_state_db(tmp_path / "state_5.sqlite", [("other", "gpt-5.6-sol")])
     config = make_config(
         tmp_path / "config.toml",
@@ -92,7 +92,7 @@ def test_config_toml_is_never_opened(tmp_path: Path, monkeypatch) -> None:
 
 
 def spy_on_queries(monkeypatch) -> list[tuple]:
-    """Record every statement codex_model runs, delegating to real sqlite3."""
+    """실제 sqlite3에 위임하면서 codex_model이 실행하는 모든 문을 기록한다."""
     seen: list[tuple] = []
     real_connect = sqlite3.connect
 
@@ -150,7 +150,7 @@ def test_the_database_is_opened_read_only(tmp_path: Path, monkeypatch) -> None:
 def test_a_path_with_uri_metacharacters_cannot_redirect_the_open(
     tmp_path: Path,
 ) -> None:
-    """``?`` in a directory name must not be parsed as a URI query."""
+    """디렉터리 이름의 ``?``를 URI 쿼리로 해석해서는 안 된다."""
     home = tmp_path / "co?dex#home"
     home.mkdir()
     db = make_state_db(home / "state_5.sqlite", [("sess-a", "gpt-5.6-sol")])
@@ -169,7 +169,7 @@ def test_session_id_is_passed_as_a_bound_parameter(tmp_path: Path, monkeypatch) 
     assert "?" in sql
     assert hostile not in sql
     assert tuple(parameters) == (hostile,)
-    # The table survived, so nothing was interpolated into the statement.
+    # 테이블이 그대로이므로 문에는 어떤 값도 보간되지 않았다.
     monkeypatch.undo()
     connection = sqlite3.connect(db)
     assert connection.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
@@ -205,7 +205,7 @@ def test_non_regular_state_db_is_refused(tmp_path: Path) -> None:
 
 
 def swap_on_connect(monkeypatch, replace: "callable") -> None:
-    """Let ``replace`` change the path between the open and the query."""
+    """열기와 쿼리 사이에 ``replace``가 경로를 바꾸게 한다."""
     real_connect = sqlite3.connect
 
     def swapping_connect(*args, **kwargs):
@@ -219,7 +219,7 @@ def swap_on_connect(monkeypatch, replace: "callable") -> None:
 def test_state_db_replaced_after_the_open_is_refused(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The TOCTOU window: a different file at the path is never queried."""
+    """TOCTOU 구간: 해당 경로의 다른 파일에는 절대 쿼리하지 않는다."""
     db = make_state_db(tmp_path / "state_5.sqlite", [("sess-a", "gpt-5.6-sol")])
     impostor = make_state_db(tmp_path / "impostor.sqlite", [("sess-a", "planted")])
     swap_on_connect(monkeypatch, lambda: os.replace(impostor, db))
@@ -263,7 +263,7 @@ def test_state_db_removed_after_the_open_is_refused(
 def test_an_unchanged_database_still_resolves_under_the_guard(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The guard must not reject the ordinary case it is wrapped around."""
+    """보호 장치는 자신이 감싸는 일반적인 경우를 거부해서는 안 된다."""
     db = make_state_db(tmp_path / "state_5.sqlite", [("sess-a", "gpt-5.6-sol")])
     swap_on_connect(monkeypatch, lambda: None)
 

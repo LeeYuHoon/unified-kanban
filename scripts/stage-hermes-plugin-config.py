@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a Hermes plugin config mutation inside a retained-FD staging tree."""
+"""FD를 유지하는 스테이징 트리 안에서 Hermes 플러그인 설정 변경을 실행한다."""
 
 from __future__ import annotations
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Activate the reviewed immutable Hermes release without ever mutating the
-# Hermes checkout. The checkout named by HERMES_AGENT_REPO is a read-only input
-# that only supplies the sibling release root; every release is constructed
-# under <HERMES_AGENT_REPO>.releases/release-<carried> and selected by swapping
-# one regular selector file inside a path transaction.
+# Hermes 체크아웃을 전혀 변경하지 않고 검토된 불변 Hermes 릴리스를 활성화한다.
+# HERMES_AGENT_REPO가 가리키는 체크아웃은 형제 릴리스 루트만 제공하는 읽기 전용
+# 입력이다. 모든 릴리스는 <HERMES_AGENT_REPO>.releases/release-<carried> 아래에
+# 생성되며 경로 트랜잭션 안에서 일반 선택자 파일 하나를 교체하여 선택한다.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -30,8 +29,8 @@ while (($#)); do
     --check) CHECK=1 ;;
     --prepare-only) PREPARE_ONLY=1 ;;
     --no-restart) NO_RESTART=1 ;;
-    # Backward-compatible no-op: no checkout is ever mutated in place, so there
-    # is nothing a caller could need to force past.
+    # 하위 호환성을 위한 무동작 처리다. 체크아웃을 제자리에서 변경하는 일이 없으므로
+    # 호출자가 강제로 진행해야 할 대상도 없다.
     --force) ;;
     -h|--help)
       echo "Usage: ./scripts/update-hermes-if-needed.sh [--check] [--prepare-only] [--no-restart]"
@@ -41,9 +40,9 @@ while (($#)); do
   shift
 done
 
-# Prerequisites are refused before anything managed is created. Immutable
-# release publication requires macOS renamex_np, so an unsupported platform
-# must stop here rather than half-way through a release build.
+# 관리 대상을 만들기 전에 필수 조건을 충족하지 못하면 거부한다. 불변 릴리스
+# 게시에는 macOS renamex_np가 필요하므로 지원되지 않는 플랫폼은 릴리스 빌드
+# 도중이 아니라 여기서 중단해야 한다.
 [[ "$(uname -s)" == "Darwin" ]] || {
   echo "Unified Kanban supports macOS only" >&2
   exit 1
@@ -76,9 +75,8 @@ AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
   echo "HERMES_AGENT_REPO must be an absolute path: $AGENT_REPO" >&2
   exit 1
 }
-# The selector this swaps must be the selector the installed launcher reads, so
-# both sides derive it from one normal form instead of concatenating whatever
-# spelling the environment supplied.
+# 여기서 교체하는 선택자는 설치된 실행기가 읽는 선택자여야 한다. 따라서 양쪽 모두
+# 환경이 제공한 표기를 그대로 연결하지 않고 하나의 정규형에서 선택자를 유도한다.
 AGENT_REPO="$(PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
   python3 -m kanban_adapter.release_layout "$AGENT_REPO")" || exit 1
 HERMES_RELEASE_ROOT="${AGENT_REPO}.releases"
@@ -94,8 +92,8 @@ CARRIED_BUNDLE="$REPO_ROOT/patches/hermes-agent-carried.bundle"
 DASHBOARD_HOST="${HERMES_DASHBOARD_HOST:-127.0.0.1}"
 DASHBOARD_PORT="${HERMES_DASHBOARD_PORT:-9119}"
 DASHBOARD_READY_ATTEMPTS="${HERMES_DASHBOARD_READY_ATTEMPTS:-20}"
-# Both values reach an arithmetic context or a URL, so they are constrained
-# before use rather than interpolated as whatever the environment supplied.
+# 두 값은 산술 컨텍스트나 URL에 들어가므로 환경이 제공한 값을 그대로 보간하지 않고
+# 사용 전에 제약 조건을 적용한다.
 [[ "$DASHBOARD_PORT" =~ ^[0-9]{1,5}$ ]] && ((DASHBOARD_PORT >= 1 && DASHBOARD_PORT <= 65535)) || {
   echo "HERMES_DASHBOARD_PORT must be a TCP port number: $DASHBOARD_PORT" >&2
   exit 1
@@ -108,8 +106,8 @@ DASHBOARD_READY_ATTEMPTS="${HERMES_DASHBOARD_READY_ATTEMPTS:-20}"
   echo "HERMES_DASHBOARD_HOST must be a bare host or address: $DASHBOARD_HOST" >&2
   exit 1
 }
-# A dashboard bound to a wildcard address cannot be probed at its bind address,
-# and an IPv6 literal has to be bracketed before it can go into a URL.
+# 와일드카드 주소에 바인딩된 대시보드는 그 바인딩 주소로 탐색할 수 없으며, IPv6
+# 리터럴은 URL에 넣기 전에 대괄호로 감싸야 한다.
 PROBE_HOST="$DASHBOARD_HOST"
 case "$DASHBOARD_HOST" in
   0.0.0.0) PROBE_HOST="127.0.0.1" ;;
@@ -139,9 +137,9 @@ PY
 )"
 TARGET_RELEASE="$HERMES_RELEASE_ROOT/release-$FINAL_CARRIED_COMMIT"
 
-# Every external command loses the transaction authority, the delegated Hermes
-# turn context, and any ambient Git authority, and never inherits the retained
-# transaction directory or ledger descriptors.
+# 모든 외부 명령은 트랜잭션 권한, 위임된 Hermes 턴 컨텍스트, 주변 Git 권한을
+# 제거한 상태로 실행되며, 보존된 트랜잭션 디렉터리나 원장 디스크립터를 절대
+# 상속하지 않는다.
 run_scrubbed() (
   for name in "${!GIT_@}"; do unset "$name"; done
   for name in "${!UNIFIED_KANBAN_@}"; do unset "$name"; done
@@ -264,8 +262,8 @@ activation_required() {
   if [[ "$SELECTED_RELEASE" != "$TARGET_RELEASE" ]]; then
     return 0
   fi
-  # Naming the reviewed release is not the same as running it: a selection whose
-  # release is gone, or is no longer a real directory, is not up to date.
+  # 검토된 릴리스를 가리키는 것과 실제로 실행하는 것은 다르다. 릴리스가 없거나 더
+  # 이상 실제 디렉터리가 아닌 선택 상태는 최신 상태가 아니다.
   if [[ -d "$TARGET_RELEASE" && ! -L "$TARGET_RELEASE" ]]; then
     return 1
   fi
@@ -283,11 +281,10 @@ if ((CHECK)); then
   exit 0
 fi
 
-# Nothing to activate and nothing interrupted is decided from two reads, so it
-# is decided before the state directory or the lock exists: a no-change run
-# leaves the host exactly as it found it. Every other outcome falls through and
-# is re-decided under the lock below, where a concurrent activation that
-# published its marker between these two reads is settled.
+# 활성화할 것도 중단된 것도 없다는 판단은 두 번의 읽기로 이루어지므로 상태
+# 디렉터리나 잠금이 생기기 전에 결정한다. 변경 없는 실행은 호스트를 발견한 그대로
+# 둔다. 그 밖의 모든 결과는 아래로 진행해 잠금 아래에서 다시 판단하며, 두 읽기
+# 사이에 마커를 게시한 동시 활성화도 그곳에서 정리한다.
 if ((PREPARE_ONLY == 0)); then
   read_pending_state
   if ! activation_required && ((PENDING_STATUS == 3)); then
@@ -370,9 +367,8 @@ start_dashboard() {
   return 1
 }
 
-# Services are restarted only after the selector already names the release they
-# must run, so a restarted process always execs through the selection this run
-# committed.
+# 선택자가 서비스가 실행해야 할 릴리스를 이미 가리킨 뒤에만 서비스를 재시작한다.
+# 따라서 재시작된 프로세스는 항상 이번 실행이 커밋한 선택을 통해 exec한다.
 ensure_macos_gateway_supervised() {
   local cli="$1" expected_release="$2" attempt status_output
   if [[ "$(/usr/bin/uname -s)" != "Darwin" ]]; then
@@ -417,9 +413,9 @@ restart_services() {
   return 0
 }
 
-# Compensation for a rolled-back activation: the services were started against
-# a release that is no longer selected, so they are restarted against the
-# restored selector. Failure here is reported, never hidden.
+# 롤백된 활성화에 대한 보상 작업이다. 서비스가 더 이상 선택되지 않은 릴리스를
+# 대상으로 시작됐으므로 복원된 선택자를 대상으로 다시 시작한다. 여기서 발생한
+# 실패는 절대 숨기지 않고 보고한다.
 launchd_gateway_state() {
   local domain uid output status expected
   uid="$(/usr/bin/id -u)"
@@ -459,9 +455,9 @@ compensate_services() {
     fi
   fi
 
-  # Never reopen the canonical selector or plist after rollback. The private
-  # exports are exact opening snapshots retained behind the transaction's 0700
-  # directory capability, so a foreign canonical successor cannot be executed.
+  # 롤백 후에는 표준 선택자나 plist를 절대 다시 열지 않는다. 비공개 내보내기는
+  # 트랜잭션의 0700 디렉터리 권한 뒤에 보존된 정확한 시작 시점 스냅샷이므로 외부
+  # 표준 후속 객체가 실행될 수 없다.
   run_scrubbed /bin/launchctl bootout "$domain/ai.hermes.gateway" \
     >/dev/null 2>&1 || true
   if [[ -f "$prior_plist" && ! -L "$prior_plist" ]]; then
@@ -554,9 +550,9 @@ checkpoint_stage() {
     "$TRANSACTION_RECEIPT" "$STAGE_RECEIPT" "$TRANSACTION_TOKEN")"
 }
 
-# The reviewed release is bound to the immutable official snapshot recorded in
-# the repository pin. The moving official main is observed only to report that
-# another update is available; it does not invalidate completed review evidence.
+# 검토된 릴리스는 저장소 핀에 기록된 불변 공식 스냅샷에 바인딩된다. 계속 이동하는
+# 공식 main은 다른 업데이트가 있음을 보고하기 위해서만 관찰하며, 완료된 검토 증거를
+# 무효화하지 않는다.
 observe_newer_upstream() {
   local observed=""
   if ! observed="$(
@@ -574,15 +570,15 @@ observe_newer_upstream() {
   fi
 }
 
-# The release trap is armed before the lock exists so no signal can land in
-# between and leave a lock this run owns but never releases.
+# 잠금이 생기기 전에 릴리스 트랩을 설정하여, 그 사이에 신호가 도착해 이번 실행이
+# 소유하지만 해제하지 못하는 잠금이 남지 않게 한다.
 trap release_lock EXIT
 trap 'exit 129' INT
 trap 'exit 143' TERM
 python3 "$REPO_ROOT/scripts/update-state.py" ensure-dir directory "$STATE_DIR"
 acquire_lock
 
-# Re-read both durable references under the shared activation/GC lock.
+# 공유 활성화/GC 잠금 아래에서 두 영속 참조를 다시 읽는다.
 SELECTED_RELEASE="$(read_selected_release)"
 PREVIOUS_RELEASE="$(read_release_file "$HERMES_RELEASE_PREVIOUS")"
 
@@ -609,17 +605,17 @@ if ((PREPARE_ONLY)); then
   exit 0
 fi
 
-# Nothing to activate and nothing interrupted: no release construction, no
-# setup, no service restart, no state write.
+# 활성화할 것도 중단된 것도 없으므로 릴리스 생성, setup, 서비스 재시작, 상태 쓰기를
+# 수행하지 않는다.
 if ((ACTIVATION_REQUIRED == 0)) && ((PENDING_STATUS == 3)); then
   echo "SKIPPED: Hermes release $FINAL_CARRIED_COMMIT is already selected"
   exit 0
 fi
 
-# The installed launcher must be the managed launcher for exactly this
-# HERMES_AGENT_REPO layout. Otherwise the selector this run swaps is not the
-# selector the installed launcher reads, and restarting services would hand
-# control to something unified-kanban never produced.
+# 설치된 실행기는 정확히 이 HERMES_AGENT_REPO 레이아웃을 위한 관리형 실행기여야
+# 한다. 그렇지 않으면 이번 실행이 교체하는 선택자와 설치된 실행기가 읽는 선택자가
+# 달라지며, 서비스를 재시작할 때 unified-kanban이 만든 적 없는 대상에 제어권을
+# 넘기게 된다.
 [[ -f "$HERMES_LAUNCHER" && ! -L "$HERMES_LAUNCHER" ]] || {
   echo "managed Hermes launcher is missing: $HERMES_LAUNCHER" >&2
   echo "run ./scripts/setup.sh first" >&2
@@ -633,8 +629,8 @@ LAUNCHER_STATUS=$?
 set -e
 case "$LAUNCHER_STATUS" in
   0) ;;
-  # Exit 3 is the release manager's "provably not our launcher" verdict; any
-  # other failure is an internal fault and must not be read as a verdict.
+  # 종료 코드 3은 릴리스 관리자의 "우리 실행기가 아님이 입증됨" 판정이다. 그 밖의
+  # 모든 실패는 내부 오류이며 판정으로 해석해서는 안 된다.
   3)
     echo "refusing to activate a release for a Hermes launcher unified-kanban did not install: $HERMES_LAUNCHER" >&2
     echo "run ./scripts/setup.sh first" >&2
@@ -651,9 +647,8 @@ else
   echo "RESUMING: completing the interrupted activation of $FINAL_CARRIED_COMMIT"
 fi
 
-# prepare is idempotent: it builds the release when absent and otherwise
-# verifies the existing release exactly - source tree, Git metadata, dependency
-# inventory, and completion receipt - before it may be reused.
+# prepare는 멱등적이다. 릴리스가 없으면 빌드하고, 있으면 소스 트리, Git 메타데이터,
+# 의존성 목록, 완료 영수증을 정확히 검증한 뒤에만 재사용한다.
 HERMES_RELEASE="$(python3 "$REPO_ROOT/scripts/hermes-release-manager.py" prepare \
   "$AGENT_REPO" "$SUPPORTED_UPSTREAM" "$FINAL_CARRIED_COMMIT" "$CARRIED_BUNDLE" \
   --uv "$REAL_UV" --npm "$NPM_BIN")"
@@ -663,16 +658,15 @@ python3 "$REPO_ROOT/scripts/verify-carried-bundle.py" --hermes-repo "$HERMES_REL
   exit 1
 }
 
-# A dashboard that is running now must be moved onto the new release, and a
-# dashboard that was running before an interrupted run must come back.
+# 현재 실행 중인 대시보드는 새 릴리스로 옮겨야 하며, 중단된 실행 전에 동작하던
+# 대시보드는 다시 실행되어야 한다.
 DASHBOARD_WAS_RUNNING=0
 if [[ "$PENDING_DASHBOARD" == 1 ]] || dashboard_ready; then
   DASHBOARD_WAS_RUNNING=1
 fi
 
-# The pending marker is published before the selector moves. A crash after the
-# swap, or after the swap and before the services are restarted, is recovered by
-# the next run instead of being reported as an up-to-date installation.
+# 선택자를 옮기기 전에 보류 마커를 게시한다. 교체 후 또는 교체와 서비스 재시작
+# 사이에 충돌이 나면 설치가 최신이라고 보고하지 않고 다음 실행에서 복구한다.
 PENDING_RECEIPT="$(python3 "$REPO_ROOT/scripts/update-state.py" write pending \
   "$PENDING_FILE" "$FINAL_CARRIED_COMMIT" "$DASHBOARD_WAS_RUNNING")"
 
@@ -703,10 +697,10 @@ RECEIPT_PATH="$TRANSACTION_DIR/receipt.json"
 PRIOR_SELECTOR="$TRANSACTION_DIR/hermes-release-selector.before"
 PRIOR_GATEWAY_PLIST="$TRANSACTION_DIR/ai.hermes.gateway.before.plist"
 trap finish_update EXIT
-# A resumed interrupted activation may have published the selector but not the
-# plist. Bind both paths from the transaction's opening snapshot on every
-# non-skipped completion attempt. The trap only receives rollback authority
-# after both retained opening capabilities have been exported successfully.
+# 재개된 중단 활성화는 선택자는 게시했지만 plist는 게시하지 못했을 수 있다.
+# 건너뛰지 않은 모든 완료 시도에서 트랜잭션 시작 스냅샷을 기준으로 두 경로를 모두
+# 바인딩한다. 보존된 두 시작 시점 권한을 성공적으로 내보낸 뒤에만 트랩에 롤백
+# 권한을 부여한다.
 TRANSACTION_TOKEN="$(python3 "$REPO_ROOT/scripts/path-transaction.py" begin \
   "$RECEIPT_PATH" "$HERMES_RELEASE_SELECTOR" "$HERMES_RELEASE_PREVIOUS" \
   "$GATEWAY_PLIST")"
@@ -716,8 +710,8 @@ python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
   "$RECEIPT_PATH" "$GATEWAY_PLIST" "$PRIOR_GATEWAY_PLIST"
 TRANSACTION_RECEIPT="$RECEIPT_PATH"
 if ((ACTIVATION_REQUIRED)); then
-  # Publish rollback authority before moving current. A crash after current moves
-  # therefore cannot leave the prior known-good release undiscoverable.
+  # current를 옮기기 전에 롤백 권한을 게시한다. 따라서 current 이동 후 충돌이 나도
+  # 이전의 정상임이 확인된 릴리스를 찾을 수 없는 상태로 남지 않는다.
   if [[ -n "$SELECTED_RELEASE" && "$SELECTED_RELEASE" != "$TARGET_RELEASE" ]]; then
     PREVIOUS_CANDIDATE="$TRANSACTION_DIR/hermes-release-previous"
     python3 "$REPO_ROOT/scripts/hermes-release-manager.py" render-reference \
@@ -759,14 +753,14 @@ restart_services || {
 }
 
 if ((NO_RESTART)); then
-  # The activation is complete but the services still run the previous release,
-  # so the pending marker stays and the next ordinary run finishes the restart.
+  # 활성화는 완료됐지만 서비스는 여전히 이전 릴리스를 실행하므로 보류 마커를
+  # 유지하고 다음 일반 실행에서 재시작을 완료한다.
   echo "Hermes release $FINAL_CARRIED_COMMIT is selected at $TARGET_RELEASE"
   echo "Services were left untouched; rerun without --no-restart to restart them"
 else
-  # The activation and the restart both completed. Failing to clear the marker
-  # afterwards is a cleanup fault, not an incomplete update, so it must not undo
-  # a committed activation; the worst it costs is one redundant restart later.
+  # 활성화와 재시작이 모두 완료됐다. 이후 마커 제거 실패는 미완료 업데이트가 아니라
+  # 정리 오류이므로 커밋된 활성화를 되돌려서는 안 된다. 최악의 비용은 나중에 한 번
+  # 불필요하게 재시작하는 것뿐이다.
   if python3 "$REPO_ROOT/scripts/update-state.py" remove pending \
     "$PENDING_FILE" "$PENDING_RECEIPT"; then
     PENDING_RECEIPT=""

@@ -109,11 +109,11 @@ class HermesNormalizerTests(HermesBase):
         self.assertEqual(reasons.get("hidden_display_kind"), 1, reasons)
 
     def test_content_decoding_is_tolerant(self):
-        # JSON list of blocks
+        # JSON 블록 목록
         self.assertEqual(self.turns[0].final_text, "Retries use exponential backoff.")
-        # JSON string
+        # JSON 문자열
         self.assertEqual(self.turns[1].final_text, "a JSON string reply")
-        # malformed JSON degrades to the raw text
+        # 잘못된 JSON은 원문 텍스트로 처리된다.
         self.assertEqual(self.turns[2].final_text, "{not json at all")
 
     def test_tool_calls_counted_and_named_content_omitted(self):
@@ -138,17 +138,17 @@ class HermesNormalizerTests(HermesBase):
         self.assertNotIn("condensed", self.turns[1].final_text or "")
 
     def test_finish_reason_semantics(self):
-        self.assertTrue(self.turns[0].completed)          # stop
+        self.assertTrue(self.turns[0].completed)          # 중지
         self.assertIn("completed", self.turns[0].status_label())
 
-        self.assertTrue(self.turns[1].errored)            # error
+        self.assertTrue(self.turns[1].errored)            # 오류
         self.assertFalse(self.turns[1].completed)
         self.assertIn("error", self.turns[1].status_label().lower())
 
-        self.assertFalse(self.turns[2].completed)         # length
+        self.assertFalse(self.turns[2].completed)         # 길이
         self.assertIn("length", self.turns[2].status_label())
 
-        self.assertTrue(self.turns[3].completed)          # end_turn
+        self.assertTrue(self.turns[3].completed)          # 턴 종료
 
     def test_tool_calls_finish_reason_is_intermediate_not_complete(self):
         other = [s for s in self.sessions if s.session_id == "102"][0]
@@ -222,8 +222,8 @@ class HermesCliTests(HermesBase):
         self.assertNotIn("<img src=x onerror", html)
         self.assertNotIn(fixtures_hermes.REASONING_TEXT, html)
         self.assertNotIn(fixtures_hermes.TOOL_OUTPUT_TEXT, html)
-        # documented column names may appear in the heuristics list, but no raw
-        # database row content ever may
+        # 문서화된 열 이름은 휴리스틱 목록에 나타날 수 있지만 데이터베이스 행의 원시
+        # 내용은 절대 나타나면 안 된다.
         self.assertNotIn('"tool_calls"', html)
         self.assertNotIn('"function"', html)
         self.assertNotIn(fixtures_hermes.REASONING_CONTENT_TEXT, html)

@@ -1,8 +1,8 @@
-"""Provider-neutral tool-usage accounting shared by every agent source.
+"""모든 에이전트 소스가 공유하는, 제공자 중립적인 도구 사용량 집계.
 
-Only sanitized names, counts, and the model identifier are ever persisted or
-posted. Tool arguments, tool responses, commands, file paths, prompt bodies,
-and assistant transcripts never enter this module's output.
+정제(sanitize)된 이름, 횟수, 모델 식별자만이 영구 저장되거나 게시된다.
+도구 인자, 도구 응답, 명령, 파일 경로, 프롬프트 본문, 어시스턴트
+트랜스크립트는 절대 이 모듈의 출력에 포함되지 않는다.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ _MCP_TOOL_RE = re.compile(r"mcp__(.+?)__(.*)\Z", re.DOTALL)
 _MODEL_RE = re.compile(r"[A-Za-z0-9._:/-]{1,64}\Z")
 
 _NAME_LIMIT = 64
-# Whitelist grammar for every recorded name: letters, digits, and the
-# separators real Skill/subagent/MCP identifiers use, including the ``:`` of a
-# plugin-qualified ``plugin:skill``. Anchored to alphanumerics at both ends, so
-# a path, a traversal segment, a flag, or a control character cannot match.
+# 기록되는 모든 이름에 대한 화이트리스트 문법: 문자, 숫자, 그리고 실제
+# Skill/subagent/MCP 식별자가 사용하는 구분자들로, 플러그인 한정
+# ``plugin:skill``의 ``:``도 포함한다. 양 끝을 영숫자로 고정(anchor)하므로
+# 경로, 상위 디렉터리 탐색 조각, 플래그, 제어 문자는 매칭될 수 없다.
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,62}[A-Za-z0-9])?\Z")
 _RUN_RE = re.compile(r"[A-Za-z0-9]+")
 _MCP_SEPARATOR = "/"
@@ -100,38 +100,39 @@ _PROSE_CHANGE_KEYWORDS = (
     "added", "fixed", "changed", "removed", "updated", "refactored",
 )
 
-# The Claude-only comment shipped first under this exact header and consumers
-# match it byte for byte, so Claude Code keeps it unchanged. Only the sources
-# added afterwards name themselves; unknown sources fall back to the original.
+# Claude 전용 코멘트가 정확히 이 헤더로 처음 출시되었고 소비자들이 이를
+# 바이트 단위로 그대로 매칭하므로, Claude Code는 헤더를 변경하지 않는다.
+# 이후에 추가된 소스만 자신의 이름을 붙이며, 알 수 없는 소스는 원래
+# 헤더로 되돌아간다.
 USAGE_COMMENT_HEADER = "Agent tool usage"
 _SOURCE_HEADERS: dict[str, str] = {
     "codex": "Codex tool usage",
     "hermes-agent": "Hermes Agent tool usage",
 }
 
-# The one grammar for an idempotency marker, shared with the backend that
-# searches a card for it: 8-128 characters, opening alphanumeric, and no
-# character that would need escaping in a comment or a regex.
+# 멱등성 마커에 대한 단일 문법으로, 카드에서 이를 검색하는 백엔드와
+# 공유된다: 8-128자, 첫 글자는 영숫자, 그리고 코멘트나 정규식 안에서
+# 이스케이프가 필요한 문자는 포함하지 않는다.
 _EVENT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}\Z")
 
-# Per-runtime tool that loads a Skill, and the argument holding its name.
+# 런타임별로 Skill을 로드하는 도구와, 그 이름을 담는 인자.
 _SKILL_TOOLS: dict[str, tuple[str, str]] = {
     "claude-code": ("Skill", "skill"),
     "hermes-agent": ("skill_view", "name"),
 }
-# Per-runtime tool that delegates to a subagent inline. Hermes and Codex both
-# emit a dedicated subagent lifecycle hook instead, which is authoritative:
-# one Hermes ``delegate_task`` call can fan out to several children, so
-# counting the tool call would undercount them.
+# 런타임별로 인라인으로 subagent에 위임하는 도구. Hermes와 Codex는 둘 다
+# 대신 전용 subagent 생명주기 훅을 발행하며, 그쪽이 권위 있는(authoritative)
+# 신호다: Hermes의 ``delegate_task`` 호출 한 번이 여러 자식으로 확산(fan out)
+# 될 수 있으므로, 도구 호출을 세면 실제보다 적게 집계된다.
 _SUBAGENT_TOOLS: dict[str, tuple[str, str]] = {
     "claude-code": ("Task", "subagent_type"),
 }
-# Categories a runtime structurally cannot report, so the card can say so
-# instead of implying "nothing was used".
+# 런타임이 구조적으로 보고할 수 없는 카테고리. 카드가 "아무것도 사용되지
+# 않았다"고 암시하는 대신 그 사실을 명시할 수 있게 한다.
 _UNAVAILABLE: dict[str, tuple[str, ...]] = {
-    # No Codex 0.145 hook event carries a skill name: PostToolUse never
-    # reports a tool whose arguments identify the skill in use, so a skill
-    # count would have to be invented. Report the gap instead.
+    # Codex 0.145의 어떤 훅 이벤트도 스킬 이름을 담지 않는다: PostToolUse는
+    # 사용 중인 스킬을 인자로 식별할 수 있는 도구를 결코 보고하지 않으므로,
+    # 스킬 횟수는 지어내야만 얻을 수 있다. 대신 그 공백을 보고한다.
     "codex": ("skills",),
 }
 
@@ -141,10 +142,10 @@ _SUSPECT_RUN_LENGTH = 16
 
 
 def _case_transitions(run: str) -> tuple[int, int]:
-    """``(cased characters, case changes)`` across one alphanumeric run.
+    """하나의 영숫자 연속 구간(run)에 대한 ``(대소문자 있는 글자 수, 대소문자 전환 수)``.
 
-    Digits are skipped rather than treated as a boundary, so ``Ab1Cd`` counts
-    the same alternation ``AbCd`` does.
+    숫자는 경계로 취급하지 않고 건너뛰므로, ``Ab1Cd``는 ``AbCd``와 같은
+    교대(alternation) 횟수로 센다.
     """
     cased = [character for character in run if character.isalpha()]
     changes = sum(
@@ -155,20 +156,19 @@ def _case_transitions(run: str) -> tuple[int, int]:
 
 
 def _looks_opaque(value: str) -> bool:
-    """True for high-entropy blobs -- API keys, hex digests, UUIDs.
+    """높은 엔트로피의 덩어리(blob) -- API 키, 16진수 다이제스트, UUID -- 이면 True.
 
-    Real Skill, subagent and MCP names are short, separator-rich words. A long
-    unbroken alphanumeric run, or a digit-dense one, is a secret or an
-    identifier that carries no reporting value, so it is refused rather than
-    written to a card.
+    실제 Skill, subagent, MCP 이름은 짧고 구분자가 풍부한 단어들이다. 길게
+    끊기지 않은 영숫자 연속 구간이나 숫자가 빽빽한 구간은 비밀값이거나
+    보고 가치가 없는 식별자이므로, 카드에 기록하는 대신 거부한다.
 
-    Between 16 and 31 characters a run is too short for the blob rule but still
-    long enough to be a credential, so two further shapes are refused there.
-    Both are chosen to leave word-shaped names alone: ``openaiDeveloperDocs``
-    and ``searchIssuesInRepositoryByLabel`` change case a handful of times
-    across many characters and keep their lower-case word bodies, while
-    ``AbCdEfGhIjKlMnOpQrStUvWxYz123`` alternates on nearly every character and
-    an all-uppercase credential-shaped token has no lower-case body at all.
+    16자 이상 31자 이하의 구간은 blob 규칙에 걸리기엔 너무 짧지만 자격
+    증명(credential)이 되기엔 여전히 충분히 길므로, 그 구간에서는 두 가지
+    형태를 추가로 거부한다. 둘 다 단어 모양의 이름은 건드리지 않도록
+    선택되었다: ``openaiDeveloperDocs``와 ``searchIssuesInRepositoryByLabel``은
+    많은 글자에 걸쳐 대소문자가 몇 번만 바뀌고 소문자 단어 몸통을 유지하는
+    반면, ``AbCdEfGhIjKlMnOpQrStUvWxYz123``은 거의 모든 글자마다 교대하고,
+    전부 대문자인 자격 증명 모양의 토큰은 소문자 몸통이 아예 없다.
     """
     for run in _RUN_RE.findall(value):
         digits = sum(character.isdigit() for character in run)
@@ -179,23 +179,24 @@ def _looks_opaque(value: str) -> bool:
         if digits >= 4:
             return True
         cased, changes = _case_transitions(run)
-        # A long run with no lower-case body at all: an opaque token, not a
-        # name -- real identifiers of this length are not written in caps.
+        # 소문자 몸통이 전혀 없는 긴 연속 구간: 이름이 아니라 불투명한
+        # 토큰이다 -- 이 길이의 실제 식별자는 전부 대문자로 쓰이지 않는다.
         if cased and not any(character.islower() for character in run):
             return True
-        # Case flips on at least every other letter: alternation this dense is
-        # generated, never written.
+        # 최소 두 글자마다 대소문자가 뒤집힘: 이렇게 빽빽한 교대는 생성된
+        # 것이지, 사람이 쓴 것이 아니다.
         if changes * 2 >= cased:
             return True
     return sum(character.isdigit() for character in value) >= 16
 
 
 def sanitize_event_id(value: Any) -> str | None:
-    """One idempotency marker, or None when the value is not a legal one.
+    """멱등성 마커 하나를 반환하고, 값이 적법하지 않으면 None을 반환한다.
 
-    An out-of-grammar or oversized id cannot serve as a marker -- the backend
-    would refuse to search a card for it -- and echoing it into a comment would
-    put unvalidated text on a card, so it is dropped rather than repaired.
+    문법을 벗어나거나 과도하게 긴 id는 마커 역할을 할 수 없고 -- 백엔드가
+    그것으로 카드를 검색하기를 거부할 것이다 -- 그것을 코멘트에 그대로
+    되돌려 넣으면 검증되지 않은 텍스트가 카드에 실리게 되므로, 고치지
+    않고 버린다.
     """
     if not isinstance(value, str):
         return None
@@ -203,11 +204,12 @@ def sanitize_event_id(value: Any) -> str | None:
 
 
 def sanitize_identifier(value: Any) -> str | None:
-    """One whitelisted identifier, or None when the value is not one.
+    """화이트리스트에 부합하는 식별자 하나를 반환하고, 아니면 None을 반환한다.
 
-    Rejecting is deliberate: an absolute path, a ``..`` traversal, a control
-    character or a secret-looking blob is dropped outright instead of being
-    stored under a placeholder, so nothing untrusted reaches state or a card.
+    거부는 의도적이다: 절대 경로, ``..`` 상위 디렉터리 탐색, 제어 문자,
+    비밀값처럼 보이는 덩어리는 자리표시자(placeholder) 아래 저장되는 대신
+    그 자리에서 버려지므로, 신뢰할 수 없는 어떤 것도 상태나 카드에
+    도달하지 않는다.
     """
     if not isinstance(value, str):
         return None
@@ -222,19 +224,19 @@ def sanitize_identifier(value: Any) -> str | None:
 
 
 def _identifier_or_unknown(value: Any) -> str | None:
-    """``unknown`` when the runtime reported no name at all, else the
-    whitelisted identifier, else None when the reported name is illegal."""
+    """런타임이 이름을 전혀 보고하지 않았으면 ``unknown``, 그렇지 않으면
+    화이트리스트를 통과한 식별자, 보고된 이름이 불법이면 None."""
     if value is None or not isinstance(value, str) or not value.strip():
         return _UNKNOWN
     return sanitize_identifier(value)
 
 
 def sanitize_usage_name(category: str, name: Any) -> str | None:
-    """The stored form of a name in ``category``, or None when it is illegal.
+    """``category``에 속한 이름의 저장 형태를 반환하고, 불법이면 None을 반환한다.
 
-    ``mcp`` names are the one composite: exactly one structural ``/`` joining
-    two identifiers. Every other category takes a single identifier, so a slash
-    -- and with it any path -- is impossible there.
+    ``mcp`` 이름만이 유일한 복합형이다: 두 식별자를 잇는 구조적 ``/`` 정확히
+    하나. 다른 모든 카테고리는 단일 식별자를 받으므로, 슬래시는 -- 따라서
+    어떤 경로도 -- 거기서는 불가능하다.
     """
     if category == "mcp":
         if not isinstance(name, str):
@@ -251,15 +253,15 @@ def sanitize_usage_name(category: str, name: Any) -> str | None:
 
 
 def classify_subagent(role: Any) -> str | None:
-    """Whitelisted subagent/agent name, or None when the event's name is not
-    a legal identifier and must not be recorded."""
+    """화이트리스트를 통과한 subagent/agent 이름을 반환하고, 이벤트의 이름이
+    적법한 식별자가 아니어서 기록하면 안 될 때는 None을 반환한다."""
     return _identifier_or_unknown(role)
 
 
 def classify_tool(
     runtime: str, tool_name: Any, tool_input: Any
 ) -> tuple[str, str] | None:
-    """Map one tool call to ``(category, name)``, or None when uncounted."""
+    """도구 호출 하나를 ``(category, name)``으로 매핑하고, 집계 대상이 아니면 None을 반환한다."""
     if not isinstance(tool_name, str) or not tool_name:
         return None
 
@@ -299,7 +301,7 @@ def bump(usage: dict[str, Any], category: str, name: str) -> None:
 
 
 def clean_usage(usage: Any) -> dict[str, dict[str, int]]:
-    """Drop anything a hostile or stale state file could smuggle in."""
+    """적대적이거나 오래된 상태 파일이 몰래 끼워 넣을 수 있는 것은 전부 버린다."""
     if not isinstance(usage, Mapping):
         return {}
     cleaned: dict[str, dict[str, int]] = {}
@@ -317,9 +319,9 @@ def clean_usage(usage: Any) -> dict[str, dict[str, int]]:
             valid = sanitize_usage_name(category, name)
             if valid is None:
                 continue
-            # Two stale keys can normalize onto the same name; add rather than
-            # overwrite so no call is lost, and cap so a forged count cannot
-            # blow up the comment.
+            # 오래된 키 두 개가 같은 이름으로 정규화될 수 있다. 덮어쓰지
+            # 않고 더해서 어떤 호출도 잃지 않게 하고, 위조된 횟수가 코멘트를
+            # 부풀리지 못하도록 상한을 둔다.
             counts[valid] = min(counts.get(valid, 0) + count, _COUNT_LIMIT)
         if counts:
             cleaned[category] = counts
@@ -327,12 +329,12 @@ def clean_usage(usage: Any) -> dict[str, dict[str, int]]:
 
 
 def clean_tokens(tokens: Any) -> dict[str, int | None]:
-    """Return bounded canonical token counters with a computed total.
+    """상한이 적용된 정규 토큰 카운터를, 계산된 total과 함께 반환한다.
 
-    ``reasoning`` is informational and is already included in provider output
-    counts, so it is never added to ``total``. ``None`` is preserved to express
-    that a runtime cannot report a bucket; missing and hostile fields are
-    dropped rather than guessed.
+    ``reasoning``은 참고용이며 제공자의 output 횟수에 이미 포함되어 있으므로
+    ``total``에는 결코 더하지 않는다. ``None``은 런타임이 해당 버킷을 보고할
+    수 없음을 표현하기 위해 보존한다. 누락되었거나 적대적인 필드는
+    추측하는 대신 버린다.
     """
     if not isinstance(tokens, Mapping):
         return {}
@@ -591,31 +593,32 @@ def concise_summary(text: Any, limit: int = _SUMMARY_LIMIT) -> str:
 
 
 def has_reportable_usage(source: str, usage: Any) -> bool:
-    """Every tracked card gets exactly one usage comment.
+    """추적되는 모든 카드는 정확히 하나의 usage 코멘트를 받는다.
 
-    An all-empty report is meaningful: it tells the reader the turn genuinely
-    used no Skill, subagent, or MCP tool, and it still carries the source and
-    model. Suppressing it would make "nothing used" indistinguishable from
-    "never recorded".
+    전부 비어 있는 보고도 의미가 있다: 그 턴이 정말로 Skill, subagent, MCP
+    도구를 전혀 사용하지 않았음을 읽는 이에게 알려 주고, 여전히 source와
+    model 정보를 담는다. 이를 억누르면 "아무것도 사용하지 않음"이 "기록된
+    적 없음"과 구별할 수 없게 된다.
     """
     return True
 
 
 def usage_comment_header(source: Any) -> str:
-    """The first line of a usage comment, keyed by source.
+    """source를 키로 하는, usage 코멘트의 첫 줄.
 
-    Claude Code's header is the original one and is reproduced byte for byte so
-    consumers written against it keep matching; other sources get their own.
+    Claude Code의 헤더가 원본이며, 그것에 맞춰 작성된 소비자들이 계속
+    매칭할 수 있도록 바이트 단위로 그대로 재현된다. 다른 소스는 각자의
+    헤더를 가진다.
     """
     return _SOURCE_HEADERS.get(source, USAGE_COMMENT_HEADER)
 
 
 def usage_event_id(source: Any, task_id: Any) -> str:
-    """Deterministic marker for one card's single usage comment.
+    """카드 하나의 단일 usage 코멘트를 위한 결정론적 마커.
 
-    Derived only from the card's own identity, so every retry of the same card
-    -- after a crash, a failed marker write, or a re-run hook -- recomputes the
-    same value and can recognise a comment it already posted.
+    카드 자신의 정체성에서만 파생되므로, 같은 카드에 대한 모든 재시도는
+    -- 크래시 이후든, 마커 기록 실패 이후든, 재실행된 훅이든 -- 같은 값을
+    다시 계산하고 자신이 이미 게시한 코멘트를 알아볼 수 있다.
     """
     digest = hashlib.sha256(f"{source}\0{task_id}".encode("utf-8")).hexdigest()
     return f"usage-{digest[:32]}"
@@ -635,14 +638,14 @@ def usage_comment(
     unavailable: Iterable[str] = (),
     event_id: str | None = None,
 ) -> str:
-    """One bounded, structured comment body naming what the turn used.
+    """그 턴이 무엇을 사용했는지 밝히는, 크기가 제한된 구조화 코멘트 본문 하나.
 
-    The result is always parseable JSON. Size is enforced by dropping
-    lowest-count entries and re-serializing, never by slicing the serialized
-    text, so a long name can never truncate the comment mid-token. When a legal
-    ``event_id`` is given it is carried in the payload as the marker that makes
-    posting idempotent; one outside the marker grammar is dropped, so an
-    oversized id can neither leak nor push the comment past its limit.
+    결과는 항상 파싱 가능한 JSON이다. 크기 제한은 횟수가 가장 낮은 항목을
+    버리고 다시 직렬화하는 방식으로 강제하며, 직렬화된 텍스트를 자르는
+    일은 결코 없으므로 긴 이름이 코멘트를 토큰 중간에서 잘리게 만들 수
+    없다. 적법한 ``event_id``가 주어지면 게시를 멱등하게 만드는 마커로서
+    페이로드에 실린다. 마커 문법을 벗어난 id는 버려지므로, 과도하게 긴
+    id는 유출될 수도, 코멘트를 제한 너머로 밀어낼 수도 없다.
     """
     cleaned = clean_usage(usage)
     clean_source = sanitize_identifier(source) or _UNKNOWN
@@ -663,8 +666,8 @@ def usage_comment(
     if missing:
         header["unavailable"] = missing
 
-    # Highest count first, then name, so shrinking always sheds the least
-    # informative entries.
+    # 횟수 높은 순, 그다음 이름 순으로 정렬해, 축소할 때 항상 정보 가치가
+    # 가장 낮은 항목부터 떨어져 나가게 한다.
     ranked = {
         category: sorted(
             cleaned.get(category, {}).items(), key=lambda item: (-item[1], item[0])
@@ -689,12 +692,13 @@ def usage_comment(
         comment = _render(clean_source, payload)
         if len(comment) <= _COMMENT_LIMIT:
             return comment
-        # Too long: shed the lowest-count entry of the currently largest
-        # category and try again. Terminates because the header alone fits.
+        # 너무 길다: 현재 가장 큰 카테고리에서 횟수가 가장 낮은 항목을
+        # 떨어내고 다시 시도한다. 헤더만으로는 제한 안에 들어가므로 반드시
+        # 종료된다.
         widest = max(kept, key=lambda category: (len(kept[category]), category))
         if not kept[widest]:
-            # Nothing left to drop; the header itself is already bounded by
-            # the name and model limits, so this is the smallest valid form.
+            # 더 버릴 것이 없다. 헤더 자체는 이미 이름과 모델 길이 제한에
+            # 묶여 있으므로, 이것이 가장 작은 유효한 형태다.
             return comment
         kept[widest].pop()
         truncated = True

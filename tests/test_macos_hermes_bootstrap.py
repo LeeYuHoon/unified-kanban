@@ -1370,32 +1370,36 @@ def test_bootstrap_preserves_receipt_successor_created_by_installer(tmp_path: Pa
     assert receipt.read_text(encoding="utf-8") == "foreign-successor\n"
 
 
-def test_bootstrap_docs_describe_toolchain_ancestry_and_receipt_durability() -> None:
-    korean = (REPO / "README.md").read_text(encoding="utf-8")
-    english = (REPO / "README.en.md").read_text(encoding="utf-8")
+def test_authoritative_docs_describe_bootstrap_filesystem_security_contract() -> None:
+    maintenance = (REPO / "docs/maintenance.md").read_text(encoding="utf-8")
 
-    for document in (korean, english):
-        assert "Python 3.11" in document
-        assert "Node 26" in document
-        assert "fsync" in document
-        assert "intermediate ancestry" in document
-        assert "containing parent" in document
-        assert "private component" in document
-        assert "ambient Python" in document
-        assert "managed uv parent" in document
-        assert "before private" in document or "private temp" in document
-        assert "same-inode" in document
-        assert "normal setup" in document
-        assert "before installer" in document
-        assert "system Perl" in document
-        assert "absolute symlink" in document
-        assert "raw symlink target bytes" in document
-        assert "filesystem root" in document
-        assert "staging-only" in document
-        assert "complete stable bytes" in document
-        assert ("before" in document or "전에" in document) and "parent" in document
-        assert "selector" in document
-        assert "writable ancestor" in document
+    for contract in (
+        "Python 3.11",
+        "Node 26",
+        "fsync",
+        "intermediate ancestry",
+        "containing parent",
+        "private component",
+        "ambient Python",
+        "managed uv parent",
+        "before private",
+        "same-inode",
+        "normal setup",
+        "before installer",
+        "system Perl",
+        "absolute symlink",
+        "raw symlink target bytes",
+        "filesystem root",
+        "staging-only",
+        "complete stable bytes",
+        "selector",
+        "writable ancestor",
+        "Descriptor-relative",
+        "TOCTOU",
+    ):
+        assert contract in maintenance
+
+    assert "before" in maintenance and "parent" in maintenance
 
 
 def test_setup_delegates_bootstrap_identity_to_status_helper() -> None:

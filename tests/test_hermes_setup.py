@@ -74,9 +74,8 @@ def environment(tmp_path: Path) -> dict[str, str]:
     agent_repo.mkdir()
     carried = fixture_root / "patches/hermes-agent-carried-commits"
     python = fake_bin / "python3"
-    # Stand in for immutable release construction: build the sibling release at
-    # its real path with an executable Hermes, and refuse a missing reviewed
-    # bundle exactly as the real release manager does.
+    # 불변 릴리스 생성을 대체한다. 실제 경로에 실행 가능한 Hermes를 포함한 형제
+    # 릴리스를 빌드하고, 실제 릴리스 관리자와 똑같이 검토된 번들이 없으면 거부한다.
     python.write_text(
         "#!/usr/bin/env bash\n"
         "if [[ $1 == */scripts/verify-carried-bundle.py ]]; then exit 0; fi\n"

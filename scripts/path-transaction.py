@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Identity-bound rollback receipts for setup and uninstall host paths."""
+"""setup과 uninstall이 다루는 호스트 경로를 위한, identity에 결속된 rollback receipt."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def _clear_mac_acl(fd: int) -> None:
 
 
 def _make_file_private(fd: int) -> None:
-    """Remove effective non-owner access from an already verified regular inode."""
+    """이미 검증된 일반(regular) inode에서 소유자가 아닌 주체의 실효 접근 권한을 제거한다."""
     if sys.platform == "darwin":
         libc = ctypes.CDLL(None, use_errno=True)
         fchflags = libc.fchflags
@@ -266,7 +266,7 @@ def _created_directory_identity(info: os.stat_result) -> list[int]:
 
 
 def _canonicalize_trusted_root_alias(path: Path) -> Path:
-    """Resolve only macOS's fixed root aliases; never follow user-controlled parents."""
+    """macOS의 고정된 루트 별칭만 해석하며, 사용자가 제어하는 부모 경로는 절대 따라가지 않는다."""
     parts = path.parts
     if len(parts) < 2 or parts[0] != "/" or parts[1] not in _TRUSTED_ROOT_ALIASES:
         return path
@@ -613,7 +613,7 @@ def _publish_temp_exclusive(
     name: str,
     expected: dict[str, Any],
 ) -> None:
-    """Publish a regular-file temp without replacing a concurrently created leaf."""
+    """동시에 생성된 leaf를 대체하지 않으면서 일반 파일 temp를 게시한다."""
     if not _equivalent(_snapshot_at(directory_fd, temp, Path(name)), expected):
         raise RuntimeError("publication temp changed before link")
     os.link(
@@ -635,7 +635,7 @@ def _publish_temp_exclusive(
 
 
 def _swap_names_atomic(directory_fd: int, first: str, second: str) -> None:
-    """Atomically exchange two entries without conflating exchange and durability."""
+    """교환과 내구성(durability)을 뒤섞지 않고 두 엔트리를 원자적으로 교환한다."""
     if sys.platform != "darwin":
         raise RuntimeError("atomic transaction receipt exchange requires macOS")
     libc = ctypes.CDLL(None, use_errno=True)
@@ -653,14 +653,14 @@ def _swap_names_atomic(directory_fd: int, first: str, second: str) -> None:
         os.fsencode(first),
         directory_fd,
         os.fsencode(second),
-        0x00000002,  # RENAME_SWAP from <sys/stdio.h>
+        0x00000002,  # <sys/stdio.h>에 정의된 RENAME_SWAP
     ) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), f"{first} <-> {second}")
 
 
 def _swap_names(directory_fd: int, first: str, second: str) -> None:
-    """Atomically exchange two directory entries and make the exchange durable."""
+    """두 디렉터리 엔트리를 원자적으로 교환하고 그 교환을 내구성 있게 만든다."""
     _swap_names_atomic(directory_fd, first, second)
     os.fsync(directory_fd)
 
@@ -668,7 +668,7 @@ def _swap_names(directory_fd: int, first: str, second: str) -> None:
 def _minimal_identity_at(
     directory_fd: int, name: str
 ) -> list[int] | None:
-    """Read only leaf identity; never inspect foreign type, contents, ACL, or size."""
+    """leaf의 identity만 읽으며, 외부(foreign) 대상의 타입, 내용, ACL, 크기는 절대 조사하지 않는다."""
     try:
         info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -683,7 +683,7 @@ def _restore_unknown_displaced(
     path: Path,
     placeholder: dict[str, Any],
 ) -> OSError | None:
-    """Reverse an exchange without reading or classifying the displaced leaf."""
+    """밀려난(displaced) leaf를 읽거나 분류하지 않고 교환을 되돌린다."""
     placeholder_identity = placeholder["identity"]
     last_error: OSError | None = None
     for _attempt in range(3):
@@ -720,7 +720,7 @@ def _restore_swapped_canonical(
     displaced: dict[str, Any],
     placeholder: dict[str, Any],
 ) -> OSError | None:
-    """Restore a displaced canonical entry, retrying a failed atomic exchange."""
+    """실패한 원자적 교환을 재시도하면서, 밀려난 canonical 엔트리를 복원한다."""
     last_error: OSError | None = None
     for _attempt in range(3):
         current_canonical = _snapshot_at(directory_fd, canonical, path)
@@ -776,7 +776,7 @@ def _rename_exclusive(directory_fd: int, source: str, destination: str) -> None:
         os.fsencode(source),
         directory_fd,
         os.fsencode(destination),
-        0x00000004,  # RENAME_EXCL
+        0x00000004,  # RENAME_EXCL 플래그
     ) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), f"{source} -> {destination}")
@@ -1585,9 +1585,9 @@ def replace_file(
         observed = _snapshot_at(target_fd, target_name, target)
         if observed.get("identity") != installed_identity or observed.get("sha256") != candidate["sha256"]:
             raise RuntimeError(f"replace-file target changed immediately after commit: {target}")
-        # The verification read above can advance atime. Reapply the complete
-        # final metadata through the still identity-bound installed inode and do
-        # not read its contents again before returning authority.
+        # 위의 검증 읽기는 atime을 앞으로 진행시킬 수 있다. 여전히 identity에
+        # 결속되어 있는, 설치된 inode를 통해 완전한 최종 메타데이터를 다시
+        # 적용하고, 권한을 반환하기 전에 그 내용을 다시 읽지 않는다.
         _apply_snapshot_metadata_at(
             target_fd, target_name, final_snapshot, installed_identity
         )
@@ -1615,11 +1615,11 @@ def replace_file(
             and installed_identity is not None
             and current.get("identity") == installed_identity
         ):
-            # link(2) may have committed the operation-owned inode before the
-            # containing-directory fsync (or later verification) failed.
-            # Recover that committed disposition from the producer identity so
-            # compensation removes only our publication and restores the exact
-            # retained original.
+            # 상위 디렉터리 fsync(또는 그 이후 검증)가 실패하기 전에 link(2)가
+            # operation이 소유한 inode를 이미 커밋했을 수 있다.
+            # 그 커밋된 배치 상태를 생산자 identity로부터 복구하여, 보상 처리가
+            # 우리의 게시물만 제거하고 보관해 둔 원본을 정확히 그대로
+            # 복원하도록 한다.
             published_identity = installed_identity
         owns_publication = (
             published_identity is not None
@@ -1902,15 +1902,15 @@ def rollback_from_ledger(receipt: Path, ledger_fd: int) -> None:
 def rollback_operation_from_ledger(
     receipt: Path, operation_receipt: Path, ledger_fd: int
 ) -> None:
-    """Undo one operation the transaction manifest never checkpointed.
+    """트랜잭션 manifest가 한 번도 checkpoint하지 않은 operation 하나를 되돌린다.
 
-    A stage receipt is not a manifest receipt: it carries no snapshotted
-    entries, no created parents, and no ledger token of its own, so it can never
-    be its own rollback authority. Recovery therefore validates it exactly as
-    :func:`checkpoint` would - against the manifest the ledger still authorizes
-    - and restores each changed path from the manifest baseline. The manifest is
-    left intact for the caller to roll back afterwards, so an interrupted
-    operation and the checkpointed stages before it unwind in one order.
+    stage receipt는 manifest receipt가 아니다. 스냅샷된 entries도, 생성된
+    parents도, 자체 ledger 토큰도 지니지 않으므로 결코 스스로의 rollback 권한이
+    될 수 없다. 따라서 복구는 :func:`checkpoint`가 하는 것과 정확히 같은 방식으로
+    - ledger가 여전히 승인하는 manifest에 대해 - 이를 검증하고, 변경된 각 경로를
+    manifest baseline으로부터 복원한다. manifest는 호출자가 이후에 롤백할 수
+    있도록 손대지 않고 남겨 두므로, 중단된 operation과 그 이전에 checkpoint된
+    stage들이 하나의 순서로 되감긴다.
     """
     expected_token = _ledger_authority_token(receipt, ledger_fd)
     receipt_snapshot = _require_receipt_snapshot(receipt, expected_token)
@@ -1938,10 +1938,10 @@ def rollback_operation_from_ledger(
         current = _snapshot(Path(entry["path"]))
         _verify_operation_entry(operation, current)
         if entry.get("managed"):
-            # A checkpoint already adopted this disposition, so the manifest
-            # owns it and the manifest rollback restores it. The stage receipt
-            # is only a leftover here, and a receipt that disagrees with the
-            # checkpointed installation is not ours to act on.
+            # checkpoint가 이미 이 배치 상태를 채택했으므로 manifest가 이를
+            # 소유하며 manifest 롤백이 이를 복원한다. 여기서 stage receipt는
+            # 잔재일 뿐이고, checkpoint된 설치 상태와 어긋나는 receipt는
+            # 우리가 처리할 대상이 아니다.
             if not _equivalent(current, entry["installed"]):
                 raise RuntimeError(
                     "operation receipt disagrees with the checkpointed installation: "

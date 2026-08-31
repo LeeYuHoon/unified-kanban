@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Race-resistant strict state markers for the Hermes updater."""
+"""Hermes 업데이터를 위한, 경쟁 조건에 강한 엄격 상태 마커."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def _retire_expected(
 
 
 def _write_all(fd: int, data: bytes) -> None:
-    """Write every byte or fail instead of accepting a positive short write."""
+    """양수를 반환한 short write를 성공으로 받아들이지 않고, 모든 바이트를 쓰거나 실패한다."""
     view = memoryview(data)
     written = 0
     while written < len(view):
@@ -135,8 +135,8 @@ def _open_directory(path: Path, *, create: bool = False) -> int:
                 if not create:
                     raise
                 try:
-                    # Owner-only traversal is required for updater state capabilities.
-                    os.mkdir(component, 0o700, dir_fd=directory_fd)  # nosemgrep
+                    # 업데이터 상태 능력(capability)에는 소유자 전용 순회 권한이 필요하다.
+                    os.mkdir(component, 0o700, dir_fd=directory_fd)  # nosemgrep (의도된 소유자 전용 권한)
                 except FileExistsError:
                     pass
                 child = os.open(component, _DIR_FLAGS, dir_fd=directory_fd)
@@ -282,10 +282,10 @@ def _read(path: Path, kind: str) -> tuple[list[str], tuple[int, int]] | None:
     try:
         directory_fd, name = _open_parent(path)
     except FileNotFoundError:
-        # A state directory that was never created holds no marker, which is
-        # the same observation as a marker file that is not there. Reporting it
-        # as absent is what lets a caller decide it has nothing to do before it
-        # creates any state at all.
+        # 한 번도 생성된 적 없는 상태 디렉터리에는 마커가 없으며, 이는
+        # 마커 파일이 존재하지 않는 것과 동일한 관찰 결과다. 이를 부재로
+        # 보고해 주어야 호출자가 어떤 상태도 생성하기 전에 자신이 할 일이
+        # 없다고 판단할 수 있다.
         return None
     try:
         try:
@@ -460,8 +460,8 @@ def _write(path: Path, lines: list[str]) -> tuple[int, int]:
 
 
 def _remove(path: Path, expected_identity: tuple[int, int]) -> None:
-    # A tombstone avoids unlink/rename pathname races. Readers treat it as
-    # absent, while a concurrently substituted foreign inode is never removed.
+    # 툼스톤(tombstone)은 unlink/rename 경로명 경쟁을 피한다. 읽는 쪽은 이를
+    # 부재로 취급하며, 동시에 바꿔치기된 외부 inode는 결코 제거하지 않는다.
     _write_bytes(path, b"cleared\n", expected_identity=expected_identity)
 
 

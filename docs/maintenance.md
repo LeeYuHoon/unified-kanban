@@ -71,6 +71,30 @@ A candidate is first moved descriptor-relatively to a fresh private retirement n
 
 ### macOS local-filesystem threat boundary
 
+#### Bootstrap path and receipt durability contract
+
+Pre-bootstrap path normalization does not depend on ambient Python. Absent checkout, data, and
+release ancestry is validated before private temporary creation or download. The `before installer`
+phase validates the full ancestry and leaf authority of the root-owned macOS `system Perl`. Incomplete
+receipt bytes remain in a `staging-only` namespace and are armed as a recoverable candidate only after
+the durable write completes. Root-equivalent `HERMES_AGENT_REPO` and `HERMES_HOME` values are rejected
+as the `filesystem root` before bootstrap writes.
+
+The frozen installer's `venv/bin/python` `absolute symlink` is read as `raw symlink target bytes`
+through the validated system Perl and confined to the managed runtime. Before publishing or reusing
+the receipt, bootstrap runs managed Python 3.11+ and Node 26 at fixed paths after validating every
+intermediate ancestry component and the managed uv parent. It fsyncs the receipt and state directory,
+each containing parent for newly created bootstrap-state or release-root entries, and the containing
+parent of every existing private component on retry.
+
+If a crash leaves a private candidate, including one beside a canonical same-inode receipt, normal setup
+authenticates the exact bytes, identity, and toolchain before resuming publication or cleanup.
+An existing release root is validated before its containing parent is synced, and the managed launcher
+proves that it read the selector's complete stable bytes. Setup and the launcher fail closed when an
+existing checkout, release root, or data home has an unsafe writable ancestor, or when a managed
+selector or executable has unsafe ownership, mode, or link count. Descriptor-relative operations and
+TOCTOU defenses remain part of the transaction contract described below.
+
 Setup and update transactions treat canonical pathnames as raceable. Managed namespace
 changes use operation receipts, retained directory descriptors, expected inode identities,
 durable rollback, and foreign-successor preservation. Fresh 128-bit retirement names are

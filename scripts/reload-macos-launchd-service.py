@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reload the fixed Hermes gateway LaunchAgent without regenerating its plist."""
+"""plist를 다시 생성하지 않고 고정된 Hermes 게이트웨이 LaunchAgent를 다시 로드한다."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ _RETRY_DELAYS = (1, 2, 3, 5, 8)
 
 
 class ReloadError(RuntimeError):
-    """The exact managed LaunchAgent could not be safely reloaded."""
+    """관리 대상인 바로 그 LaunchAgent를 안전하게 다시 로드할 수 없었다."""
 
 
 def _run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:

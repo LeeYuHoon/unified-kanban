@@ -1,4 +1,4 @@
-"""Read-only, provider-specific token snapshots normalized for Kanban cards."""
+"""Kanban 카드용으로 정규화된, 읽기 전용의 제공자별 토큰 스냅샷."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .usage import clean_tokens
 
 
 class TranscriptNotReady(ValueError):
-    """The runtime announced a trusted path before creating its JSONL."""
+    """런타임이 JSONL을 생성하기 전에 신뢰된 경로를 먼저 알렸다."""
 
 
 def _default_root(source: str) -> Path:
@@ -30,8 +30,8 @@ def _open_runtime_jsonl(path: Path, *, root: Path) -> TextIO:
     candidate = path.expanduser()
     if not candidate.is_absolute():
         raise ValueError("token transcript path must be absolute")
-    # ``strict=False`` still resolves every existing symlink component while
-    # allowing a first-run runtime root that has not been created yet.
+    # ``strict=False``는 존재하는 모든 심볼릭 링크 구성 요소를 여전히 해석하면서도,
+    # 아직 생성되지 않은 첫 실행 런타임 루트를 허용한다.
     resolved_root = root.expanduser().resolve(strict=False)
     try:
         before = os.lstat(candidate)
@@ -145,7 +145,7 @@ def _codex_snapshot(handle: TextIO) -> dict[str, int | None]:
         "input": uncached_input,
         "output": _count(latest.get("output_tokens")),
         "cache_read": reported_cache_read,
-        # Codex currently reports cached input reads but no cache-write bucket.
+        # Codex는 현재 캐시된 입력 읽기는 보고하지만 cache-write 버킷은 없다.
         "cache_write": None,
         "reasoning": _count(latest.get("reasoning_output_tokens")),
         "requests": requests,
@@ -159,7 +159,7 @@ def token_snapshot(
     *,
     root: Path | None = None,
 ) -> dict[str, int | None]:
-    """Return cumulative canonical token counters from one runtime JSONL."""
+    """런타임 JSONL 하나에서 누적된 정식 토큰 카운터를 반환한다."""
     runtime_root = root or _default_root(source)
     with _open_runtime_jsonl(Path(path), root=runtime_root) as handle:
         if source == "claude-code":
@@ -173,7 +173,7 @@ def token_delta(
     current: Any,
     baseline: Any,
 ) -> dict[str, int | None]:
-    """Subtract two cumulative snapshots without double-counting a session."""
+    """세션을 이중 계산하지 않고 두 누적 스냅샷의 차를 구한다."""
     after = clean_tokens(current)
     before = clean_tokens(baseline)
     result: dict[str, int | None] = {}

@@ -1,4 +1,4 @@
-"""The release namespace must be identical for shell and Python callers."""
+"""릴리스 네임스페이스는 shell 호출자와 Python 호출자에서 동일해야 한다."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def test_unnormalizable_checkout_paths_fail_closed(value: str) -> None:
     ],
 )
 def test_release_root_is_the_sibling_a_shell_would_concatenate(value: str) -> None:
-    """The normal form plus ``.releases`` is exactly what the shell computes."""
+    """정규형에 ``.releases``를 더한 값은 shell이 계산하는 값과 정확히 같다."""
     repo = normalize_agent_repo(value)
 
     assert str(release_root(value)) == f"{repo}.releases"

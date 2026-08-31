@@ -54,11 +54,11 @@ def start_card(adapter, cache: Path, project: Path) -> None:
 
 
 def usage_payload(adapter, *, task_id: str = "t_abcdef12") -> dict:
-    """The one usage comment's payload, with its envelope asserted here.
+    """이곳에서 외피를 검증한 단일 사용량 주석의 페이로드.
 
-    Codex cards carry the Codex-specific header, the schema version, and the
-    event id the adapter is told to deduplicate on -- so every caller below
-    keeps asserting only the usage data itself.
+    Codex 카드는 Codex 전용 헤더, 스키마 버전, 어댑터가 중복 제거 기준으로
+    전달받은 이벤트 ID를 담는다. 따라서 아래의 모든 호출자는 사용량 데이터
+    자체만 계속 검증한다.
     """
     updates = [argv for argv, _cwd in adapter.calls if argv[0] == "update"]
     assert len(updates) == 1, updates
@@ -336,7 +336,7 @@ def test_session_end_merges_the_enriched_model_before_reporting(
     project.mkdir()
     cache = tmp_path / "cache"
     adapter = FakeAdapter()
-    # Card starts with no model at all.
+    # 카드는 처음에 모델 정보가 전혀 없다.
     codex_event(
         "prompt",
         {"session_id": "cx-2", "cwd": str(project), "prompt": "work"},
