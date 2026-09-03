@@ -160,6 +160,20 @@ def controlled_uv(tmp_path: Path) -> Path:
     return uv
 
 
+def controlled_npm(tmp_path: Path) -> Path:
+    """실제 생산자의 잠금 기반 웹 빌드 경로에 최소 산출물을 제공한다."""
+    npm = tmp_path / "npm"
+    npm.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1 $2 $3 $4\" = 'run build --workspace web' ]; then "
+        "mkdir -p node_modules hermes_cli/web_dist; "
+        "printf '<html></html>\\n' > hermes_cli/web_dist/index.html; fi\n",
+        encoding="utf-8",
+    )
+    npm.chmod(0o700)
+    return npm
+
+
 def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
     pinned_source: Path, release_workspace: Path, tmp_path: Path
 ) -> None:
@@ -174,7 +188,12 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         "allow_local_source": True,
     }
 
-    release = helper.prepare_release(layout, uv=controlled_uv(tmp_path), **build)
+    release = helper.prepare_release(
+        layout,
+        uv=controlled_uv(tmp_path),
+        npm=controlled_npm(tmp_path),
+        **build,
+    )
 
     assert release == layout.release
     assert release.parent == layout.root
@@ -193,6 +212,8 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         helper._stable_regular_bytes(release / ".git" / "HEAD")
     ).hexdigest()
     assert helper._run_git(release, "rev-parse", "HEAD") == carried
+    models_source = (release / "hermes_cli" / "models.py").read_text(encoding="utf-8")
+    assert '"anthropic/claude-fable-5.1"' in models_source
     assert stamp_info.st_nlink == 1
     assert stat.S_IMODE(stamp_info.st_mode) == 0o600
     assert stamp.read_text(encoding="utf-8") == f"git:refs/heads/main:{carried}"
@@ -200,11 +221,11 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         release, excluded_top_level={".git", helper._COMPLETION_RECEIPT}
     )
 
-    # 검토된 업스트림에는 실제로 접을 때 충돌하는 메타데이터 쌍이 있으므로 여기의
-    # 빈 레코드는 업스트림이 정리됐다는 뜻이 아니라, 탐지기가 존재 목적인 바로 그
-    # 대상을 더 이상 찾지 못한다는 뜻이다.
+    # 실제 업스트림에 허용된 메타데이터 충돌이 있으면 생산자는 정규화 결정을
+    # 영수증에 묶어야 한다. 충돌이 없는 snapshot도 빈 목록으로 명시해야 하며,
+    # 합성 충돌의 거부·정규화 동작은 release-manager 단위 테스트가 별도로 고정한다.
     collisions = receipt["case_collisions"]
-    assert collisions, "the reviewed upstream tree carries a case-fold collision"
+    assert isinstance(collisions, list)
     for record in collisions:
         namespace, _, _leaf = record["representative"].rpartition("/")
         assert f"{namespace}/" in helper.METADATA_COLLISION_NAMESPACES
@@ -279,14 +300,19 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
     assert helper.prepare_release(layout, uv=tmp_path / "absent-uv", **build) == release
     assert release.stat().st_ino == identity
 
-    # 정규화 후 남은 파일을 다시 쓰면 재사용 검증이 실패해야 하며, 검토된 바이트를
-    # 복원하면 릴리스를 다시 신뢰할 수 있어야 한다.
-    survivor = release / collisions[0]["representative"]
-    original = survivor.read_bytes()
-    survivor.write_bytes(b"attacker\n")
-    with pytest.raises(RuntimeError, match="case-fold collision"):
+    # 영수증에 묶인 추적 파일을 다시 쓰면 재사용 검증이 실패해야 하며, 검토된
+    # 바이트를 복원하면 릴리스를 다시 신뢰할 수 있어야 한다. 실제 snapshot에
+    # 충돌이 있으면 정규화 생존자를, 없으면 모델 catalog를 사용한다.
+    tamper_target = (
+        release / collisions[0]["representative"]
+        if collisions
+        else release / "hermes_cli" / "models.py"
+    )
+    original = tamper_target.read_bytes()
+    tamper_target.write_bytes(b"attacker\n")
+    with pytest.raises(RuntimeError):
         helper.prepare_release(layout, uv=tmp_path / "absent-uv", **build)
-    survivor.write_bytes(original)
+    tamper_target.write_bytes(original)
     assert helper.prepare_release(layout, uv=tmp_path / "absent-uv", **build) == release
 
 

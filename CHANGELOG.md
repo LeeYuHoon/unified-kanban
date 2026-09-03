@@ -6,6 +6,7 @@ All notable user-visible changes to this project will be documented here. The fo
 
 ### Added
 
+- Hermes Agent 0.21.0 호환성과 Claude Fable 5.1 모델 목록 지원.
 - Unified observation cards for Claude Code, Codex CLI, and Hermes Agent user turns.
 - Per-card Skill, subagent, MCP, model, and truthful token-usage metadata.
 - Repository-contained setup, uninstall, smoke, and Hermes update workflows.
@@ -19,7 +20,7 @@ All notable user-visible changes to this project will be documented here. The fo
 
 - Fail-closed Hermes compatibility checks use a repository-owned pin and no-follow descriptor identity validation.
 - Runtime gates bind the frozen pin, selected immutable release, final carried commit, completion
-  receipt, and `hermes version` upstream; moving checkout refs are not installation authority.
+  receipt, and `hermes --version` upstream; moving checkout refs are not installation authority.
 - Distribution metadata publishes no unguarded mutation console script; repository setup is the
   supported deployment path and direct module execution remains fail-closed.
 - Carried bundle commit metadata uses a project noreply identity and preserves the Hermes Agent

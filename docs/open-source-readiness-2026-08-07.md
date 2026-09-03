@@ -76,17 +76,17 @@ It includes:
 
 Release candidates additionally require local Hermes CLI smoke, setup dry-run, Gateway/Dashboard and browser checks where applicable. CI cannot substitute for those host integration checks.
 
-Latest local candidate evidence (2026-08-26 frozen snapshot; regenerate this block whenever the pin or tree changes):
+Latest local candidate evidence (2026-09-04 frozen snapshot; regenerate this block whenever the pin or tree changes):
 
-- full pytest: **999 passed, 1 skipped**;
+- full pytest: **1,214 passed, 2 skipped**;
 - `uv build`: source distribution and wheel built successfully with the MIT license included;
 - shell syntax, Python compile and `git diff --check`: passed;
 - the frozen exact pin is provenance-verified against the official repository;
-- real immutable-release construction passed; production selector, Gateway, and `hermes version` binding are separate pre-publication host gates;
+- real immutable-release construction passed; production selector, Gateway, and `hermes --version` binding are separate pre-publication host gates;
 - carried manifest/bundle: **13 manifest entries / 13 refs**;
-- bundle integrity metadata: **42,565 bytes**, SHA-256
-  `ac8f6e98c460531d62ad3f7fa750afff17a0e911f1710a8a4b00406118d7d8c5`, prerequisite
-  `03b87d666d7082e820c2605b32005da664955975` equals the
+- bundle integrity metadata: **42,585 bytes**, SHA-256
+  `9b84e3801bbaf6fcde13879648315680ded6626ae29cedab3ea7919a1b8ba1c8`, prerequisite
+  `63279301bcbdc185c1b07b98a9312eb0c862f26d` equals the
   reviewed pin; CI and `tests/test_carried_bundle.py` validate these values, pack checksum, unique
   ordered refs, regular non-symlink inputs, strict metadata, and an isolated Git unbundle;
 - fresh bundle import: 13 sanitized project-noreply identities, no personal maintainer email;
