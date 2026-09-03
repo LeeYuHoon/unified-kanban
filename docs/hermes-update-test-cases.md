@@ -13,7 +13,7 @@ Hermes Agent 업데이트 후 Unified Kanban 통합을 승인하기 위한 반�
 
 | ID | 영역 | 실행 또는 조건 | 통과 기준 |
 | --- | --- | --- | --- |
-| HU-01 | 버전 | `hermes version` | install directory가 selector가 가리키는 sibling immutable release이며 frozen upstream SHA와 carried commit 수가 표시된다. |
+| HU-01 | 버전 | `hermes --version` | install directory가 selector가 가리키는 sibling immutable release이며 frozen upstream SHA와 carried commit 수가 표시된다. |
 | HU-02 | 인증 | `hermes auth status openai-codex` | credential 값을 노출하지 않고 `logged in`이다. |
 | HU-03 | update check | `./scripts/update-hermes-if-needed.sh --check` | 검증된 release가 선택돼 있으면 `UP_TO_DATE`, 아니면 `UPDATE_AVAILABLE`을 보고한다. selector, release, lock, pending marker, 서비스를 전혀 건드리지 않는다. |
 | HU-04 | clean skip | 선택된 release가 검증된 release와 같고 pending marker가 없는 상태에서 updater 재실행 | `SKIPPED`. release 준비, bundle 검증, upstream 조회, 서비스 restart가 모두 일어나지 않고 selector inode가 그대로다. no-change 판정이 lock·state directory 생성보다 먼저 이뤄지므로 state directory가 없던 호스트에서는 생성되지 않는다. |
@@ -26,7 +26,7 @@ Hermes Agent 업데이트 후 Unified Kanban 통합을 승인하기 위한 반�
 | HU-11 | setup preflight | `./scripts/setup.sh --dry-run --no-restart --skip-smoke` | 파일·설정·서비스를 바꾸지 않고 전체 명령을 출력한다. |
 | HU-12 | setup idempotency | 실제 setup을 같은 옵션으로 2회 실행 | 두 번째 실행이 hook, link, plugin 항목을 중복 생성하지 않는다. |
 | HU-13 | project tests | `uv sync --frozen --group dev && uv run pytest -o addopts='' -q` | 수집된 전체 suite가 모두 통과한다. 개수 변경은 diff로 설명한다. |
-| HU-14 | Hermes regression | checklist의 isolated 5-file pytest 명령 | 현재 기준 99 passed, 1 skipped. |
+| HU-14 | Hermes regression | checklist의 isolated 5-file pytest 명령 | 현재 기준 114 passed, 1 skipped. |
 | HU-15 | shell/static | `bash -n ...` 및 `git diff --check` | syntax 및 whitespace 오류가 없다. |
 | HU-16 | CLI smoke | `./scripts/kanban-smoke.sh` | create → comment → complete → archive 왕복 후 `SMOKE PASS`. |
 | HU-17 | services | `hermes gateway status`, `hermes dashboard --status` | Gateway가 supervised/running이고 Dashboard가 9119에서 실행 중이다. |

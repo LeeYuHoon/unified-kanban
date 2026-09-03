@@ -19,13 +19,13 @@ git log -3 --oneline
 
 HERMES_AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
 git -C "$HERMES_AGENT_REPO" status --short --branch
-hermes version
+hermes --version
 ./scripts/update-hermes-if-needed.sh --check
 ```
 
 - [ ] Unified Kanban working tree의 기존 변경을 확인하고 보존한다.
 - [ ] Hermes checkout은 읽기 전용 입력이다. 업데이터는 checkout을 절대 변경하지 않으므로 dirty 여부가 활성화를 막지 않는다. 대신 활성화 전후로 checkout이 변하지 않았음을 확인한다.
-- [ ] `hermes version`의 install directory가 현재 선택된 release(`<HERMES_AGENT_REPO>.releases/current`가 가리키는 경로)와 같은지 확인한다.
+- [ ] `hermes --version`의 install directory가 현재 선택된 release(`<HERMES_AGENT_REPO>.releases/current`가 가리키는 경로)와 같은지 확인한다.
 - [ ] 현재 선택된 release, 검증된 carried head, carried commit 개수를 증거 템플릿에 기록한다.
 - [ ] release 시작 시 official provenance를 확인한 full 40-character SHA가 `patches/hermes-agent-supported-upstream`에 고정됐는지 확인한다. setup과 updater는 fixed official HTTPS 저장소에서 그 exact object를 가져와 identity를 검증하며, 이후 `main` 이동은 다음 maintenance cycle에서 처리한다.
 - [ ] `patches/hermes-agent-version`과 `README.md`의 Hermes 버전·공식 기반 commit·release commit을 새 carried bundle에 맞춘다. 문서 정책 테스트는 README와 manifest를 비교하고, production release 테스트는 version 파일을 bundle의 실제 `pyproject.toml`과 비교한다.
@@ -169,7 +169,7 @@ echo FRESH_BUNDLE_IMPORT_PASS
 업데이트 직후 다시 확인한다. checkout이 그대로인지도 함께 본다.
 
 ```bash
-hermes version
+hermes --version
 ./scripts/update-hermes-if-needed.sh --check
 HERMES_AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
 cat "$HERMES_AGENT_REPO.releases/current"
@@ -258,7 +258,7 @@ HERMES_AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
   -q)
 ```
 
-- [ ] 현재 기준 **99 passed, 1 skipped**를 만족한다.
+- [ ] 현재 기준 **114 passed, 1 skipped**를 만족한다.
 - [ ] warning이 생기면 새 warning인지와 기능 영향 여부를 기록한다. 현재 확인된 Starlette/httpx deprecation warning은 별도 upstream 추적 대상으로 남긴다.
 - [ ] collection error를 기능 실패로 오판하지 않는다. `No module named pytest/fastapi`이면 runtime venv가 아니라 위 isolated dev 명령을 사용한다.
 

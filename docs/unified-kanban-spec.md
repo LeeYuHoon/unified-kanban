@@ -712,7 +712,7 @@ standalone `hermes-kanban` 저장소가 본 저장소로 흡수되었다. 관찰
   불일치는 모두 어떤 bootstrap/install write보다 먼저 fail closed한다. 이미
   로드된 Hermes plugin도 등록 시점과 각 새 turn 시작에서 pin과 selector가 가리키는
   release(=`release-<carried manifest 최종 commit>`), 그 release의 실행 파일과 자기 디렉터리
-  identity에 묶인 completion receipt, `hermes version`이 보고한 upstream을 다시 검사하고, 설치된
+  identity에 묶인 completion receipt, `hermes --version`이 보고한 upstream을 다시 검사하고, 설치된
   Claude/Codex hook과 `kanban-adapter` wrapper 및 module CLI도 매 실행 전에 검사한다. checkout은
   어떤 흐름에서도 carried tip으로 이동하지 않는 읽기 전용 입력이므로 checkout `HEAD`는 gate의
   판단 근거가 아니다. direct
