@@ -21,12 +21,12 @@ Hermes Agent 업데이트 후 Unified Kanban 통합을 승인하기 위한 반�
 | HU-06 | selector integrity | selector를 symlink, 빈 파일, release 이름 형식이 아닌 값으로 교체 | 어떤 활성화도 하지 않고 실패하며 selector를 그대로 보존한다. |
 | HU-07 | unavailable frozen object | fixed official HTTPS 저장소에서 frozen pin exact fetch 실패 | release 준비와 selector 교체 전에 중단한다. live `main` 조회 실패 자체는 현재 snapshot authority가 아니다. |
 | HU-08 | release reuse gate | 이미 존재하는 release를 재사용 | source tree, Git metadata, dependency inventory, completion receipt를 정확히 검증한 뒤에만 선택한다. 검증 실패 시 이전 selector를 유지한다. |
-| HU-09 | bundle integrity | `git bundle verify`, `git bundle list-heads` | bundle이 유효하고 `carried-01`부터 `carried-13`까지 13개 ref가 있다. |
-| HU-10 | fresh import | fresh upstream clone에서 bundle fetch | manifest의 13개 commit object를 모두 조회할 수 있다. |
+| HU-09 | bundle integrity | `git bundle verify`, `git bundle list-heads` | bundle이 유효하고 순서 있는 `carried-*` ref가 manifest 및 metadata의 `ref_count`와 일치한다. |
+| HU-10 | fresh import | fresh upstream clone에서 bundle fetch | manifest의 모든 commit object를 조회할 수 있고 frozen upstream부터 단일 부모 선형 체인이다. |
 | HU-11 | setup preflight | `./scripts/setup.sh --dry-run --no-restart --skip-smoke` | 파일·설정·서비스를 바꾸지 않고 전체 명령을 출력한다. |
 | HU-12 | setup idempotency | 실제 setup을 같은 옵션으로 2회 실행 | 두 번째 실행이 hook, link, plugin 항목을 중복 생성하지 않는다. |
 | HU-13 | project tests | `uv sync --frozen --group dev && uv run pytest -o addopts='' -q` | 수집된 전체 suite가 모두 통과한다. 개수 변경은 diff로 설명한다. |
-| HU-14 | Hermes regression | checklist의 isolated 5-file pytest 명령 | 현재 기준 114 passed, 1 skipped. |
+| HU-14 | Hermes regression | checklist의 격리 Kanban 전체 focused 명령 및 React UI 테스트·빌드 | 수집된 테스트가 통과하고 skip 사유를 기록한다. 기존 carried 기능과 새 upstream 보호를 모두 유지한다. |
 | HU-15 | shell/static | `bash -n ...` 및 `git diff --check` | syntax 및 whitespace 오류가 없다. |
 | HU-16 | CLI smoke | `./scripts/kanban-smoke.sh` | create → comment → complete → archive 왕복 후 `SMOKE PASS`. |
 | HU-17 | services | `hermes gateway status`, `hermes dashboard --status` | Gateway가 supervised/running이고 Dashboard가 9119에서 실행 중이다. |
