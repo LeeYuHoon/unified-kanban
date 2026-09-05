@@ -6,6 +6,7 @@ All notable user-visible changes to this project will be documented here. The fo
 
 ### Added
 
+- 분리된 Hermes Kanban 모듈과 현재 React 화면에 관찰 카드·보드별 토큰 표시를 이식했다.
 - Hermes Agent 0.21.0 호환성과 Claude Fable 5.1 모델 목록 지원.
 - Unified observation cards for Claude Code, Codex CLI, and Hermes Agent user turns.
 - Per-card Skill, subagent, MCP, model, and truthful token-usage metadata.
@@ -18,6 +19,7 @@ All notable user-visible changes to this project will be documented here. The fo
 
 ### Security
 
+- 손상된 토큰 댓글의 JSON 중첩·정수 길이 오류가 보드 조회를 중단하지 않도록 격리했다.
 - Fail-closed Hermes compatibility checks use a repository-owned pin and no-follow descriptor identity validation.
 - Runtime gates bind the frozen pin, selected immutable release, final carried commit, completion
   receipt, and `hermes --version` upstream; moving checkout refs are not installation authority.

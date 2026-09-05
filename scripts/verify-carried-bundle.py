@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -29,8 +30,27 @@ def _verify_pinned_updater_argv(source: str) -> None:
         'git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"]',
         'git_cmd + ["merge", "--ff-only", f"origin/{branch}"]',
     )
-    if any(fragment not in source for fragment in required):
-        raise SystemExit("pinned Hermes updater Git argv contract has drifted")
+    if all(fragment in source for fragment in required):
+        return
+    # 분리된 upstream 실행기는 호출 인자 순서뿐 아니라 Git 접두사 연결도 검사한다.
+    split_calls = (
+        '_git_run(git_cmd, ["rev-list", f"HEAD..origin/{branch}", "--count"]',
+        '_git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"]',
+    )
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tree = ast.Module(body=[], type_ignores=[])
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != "_git_run":
+            continue
+        for statement in node.body:
+            call = statement.value if isinstance(statement, ast.Return) else None
+            if (isinstance(call, ast.Call) and ast.unparse(call.func) == "subprocess.run"
+                    and call.args and ast.unparse(call.args[0]) == "git_cmd + args"
+                    and all(fragment in source for fragment in split_calls)):
+                return
+    raise SystemExit("pinned Hermes updater Git argv contract has drifted")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

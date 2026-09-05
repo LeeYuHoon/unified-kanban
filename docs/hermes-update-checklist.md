@@ -1,6 +1,8 @@
 # Hermes 업데이트 검증 체크리스트
 
-이 문서는 Hermes Agent를 업데이트한 뒤 Unified Kanban 통합이 계속 동작하는지 매번 같은 기준으로 확인하기 위한 실행 체크리스트다. 명령은 Unified Kanban 저장소 루트에서 실행한다. 반복 가능한 테스트 목록은 [`hermes-update-test-cases.md`](hermes-update-test-cases.md), 최신 실측 결과는 [`hermes-update-verification-2026-08-07.md`](hermes-update-verification-2026-08-07.md)에 기록한다.
+이 문서는 Hermes Agent를 업데이트한 뒤 Unified Kanban 통합이 계속 동작하는지 매번 같은 기준으로 확인하기 위한 실행 체크리스트다. 명령은 Unified Kanban 저장소 루트에서 실행한다. 반복 가능한 테스트 목록은 [`hermes-update-test-cases.md`](hermes-update-test-cases.md), 현재 비활성 포팅 결과는 [`hermes-port-79445a496-result.md`](hermes-port-79445a496-result.md)에 기록한다. 포팅 검증과 실제 설치·서비스 활성화 승인은 구분한다.
+
+격리 프로젝트 테스트의 HOME/TMPDIR는 기존 Git 제외 영역(예: `.venv/port-home`, `.venv/port-tmp`) 안에 둔다. 루트에 무시되지 않는 임시 fixture를 만들면 배포 셸 소스 탐색이 그것도 검사한다. 또한 프로젝트 전체 pytest에는 고정 `HERMES_HOME`을 전달하지 않는다. 테스트별 HOME을 바꾸는 setup fixture의 격리를 깨뜨릴 수 있으므로 `env -u HERMES_HOME`으로 제거한다. 이 주의사항은 Hermes 자체 회귀 runner의 격리 환경과 구분한다.
 
 ## 지원 및 검증 범위
 
@@ -113,7 +115,7 @@ done < patches/hermes-agent-carried-commits
 
 - [ ] `patches/hermes-agent-carried.bundle`이 일반 파일이며 심볼릭 링크가 아닌지 확인한다.
 - [ ] `git bundle verify`가 성공하는지 확인한다.
-- [ ] `git bundle list-heads`가 현재 bundle 생성 계약인 `refs/heads/carried-*` 13개를 출력하는지 확인한다.
+- [ ] `git bundle list-heads`의 순서 있는 `refs/heads/carried-*` 개수가 manifest와 metadata의 `ref_count`에 일치하는지 확인한다. 원본 13개 변경은 새 모듈별 carried commit으로 재구성할 수 있지만 기능·회귀 테스트를 생략하면 안 된다.
 - [ ] manifest의 공백·주석 제외 항목이 유효한 commit object인지 확인한다.
 - [ ] 중복 commit SHA가 없는지 확인한다.
 - [ ] 각 대상 SHA에 해당하는 `git cherry` 행이 `-`인지 확인한다. stack의 뒤쪽 commit은 선행 commit 행까지 여러 줄로 출력할 수 있으므로 대상 SHA 행만 판정한다. `+`는 아직 적용되지 않은 patch다.
@@ -249,16 +251,13 @@ Hermes runtime venv에는 pytest가 없을 수 있으므로 runtime 환경을 �
 
 ```bash
 HERMES_AGENT_REPO="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
-(cd "$HERMES_AGENT_REPO" && uv run --isolated --frozen --extra dev pytest \
-  tests/hermes_cli/test_kanban_cli.py \
-  tests/hermes_cli/test_kanban_core_functionality.py \
-  tests/hermes_cli/test_kanban_observation.py \
-  tests/plugins/test_kanban_dashboard_plugin.py \
-  tests/plugins/test_kanban_token_usage.py \
-  -q)
+(cd "$HERMES_AGENT_REPO" && \
+  UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --frozen --extra dev --extra acp && \
+  HERMES_TEST_FILE_RETRIES=0 scripts/run_tests.sh \
+    tests/hermes_cli/test_kanban*.py tests/plugins/test_kanban*.py -j 6 --tb=short)
 ```
 
-- [ ] 현재 기준 **114 passed, 1 skipped**를 만족한다.
+- [ ] 수집된 모든 Kanban 회귀 테스트가 통과하고 skip 사유를 기록한다. 현재 분리 모듈의 연결·dispatch·workspace·review 경로와 React UI 테스트를 포함한다. 과거 테스트 개수를 통과 기준으로 삼지 않는다.
 - [ ] warning이 생기면 새 warning인지와 기능 영향 여부를 기록한다. 현재 확인된 Starlette/httpx deprecation warning은 별도 upstream 추적 대상으로 남긴다.
 - [ ] collection error를 기능 실패로 오판하지 않는다. `No module named pytest/fastapi`이면 runtime venv가 아니라 위 isolated dev 명령을 사용한다.
 

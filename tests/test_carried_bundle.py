@@ -94,7 +94,7 @@ def test_carried_bundle_metadata_and_order_are_consistent() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.startswith(
-        f"CARRIED_BUNDLE_PASS refs=13 size={metadata['size_bytes']} "
+        f"CARRIED_BUNDLE_PASS refs={metadata['ref_count']} size={metadata['size_bytes']} "
         f"sha256={metadata['sha256']} prerequisite={metadata['prerequisite']}"
     )
 
@@ -105,6 +105,27 @@ def test_pinned_updater_argv_contract_accepts_reviewed_sequence() -> None:
         'git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"]\n'
         'git_cmd + ["merge", "--ff-only", f"origin/{branch}"]\n'
     )
+
+
+def test_pinned_updater_argv_contract_accepts_split_runner() -> None:
+    verifier = _load_verifier()
+    verifier._verify_pinned_updater_argv(
+        'def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):\n'
+        '    return subprocess.run(git_cmd + args, cwd=cwd)\n'
+        '_git_run(git_cmd, ["rev-list", f"HEAD..origin/{branch}", "--count"], check=True)\n'
+        '_git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])\n'
+    )
+
+
+def test_pinned_updater_argv_contract_rejects_reversed_runner_prefix() -> None:
+    verifier = _load_verifier()
+    with pytest.raises(SystemExit, match="argv contract has drifted"):
+        verifier._verify_pinned_updater_argv(
+            'def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):\n'
+            '    return subprocess.run(args + git_cmd, cwd=cwd)\n'
+            '_git_run(git_cmd, ["rev-list", f"HEAD..origin/{branch}", "--count"], check=True)\n'
+            '_git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])\n'
+        )
 
 
 def test_pinned_updater_argv_contract_rejects_argument_order_drift() -> None:
@@ -178,13 +199,14 @@ def test_rejects_unexpected_bundle_ref_even_with_updated_metadata(tmp_path: Path
     assert "unexpected, duplicate, or misnumbered" in completed.stderr
 
 
-@pytest.mark.parametrize("replacement", ["carried-12", "carried-14"])
+@pytest.mark.parametrize("offset", [-1, 1])
 def test_rejects_duplicate_or_misnumbered_bundle_ref(
-    tmp_path: Path, replacement: str
+    tmp_path: Path, offset: int
 ) -> None:
     patches = _copy_patches(tmp_path)
     lines = _header(patches)
-    lines[-1] = lines[-1].replace("carried-13", replacement)
+    count = int(_metadata(patches)["ref_count"])
+    lines[-1] = lines[-1].replace(f"carried-{count:02d}", f"carried-{count + offset:02d}")
     _rewrite_header(patches, lines)
 
     completed = _run(patches)

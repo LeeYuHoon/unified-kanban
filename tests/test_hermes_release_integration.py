@@ -212,7 +212,7 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         helper._stable_regular_bytes(release / ".git" / "HEAD")
     ).hexdigest()
     assert helper._run_git(release, "rev-parse", "HEAD") == carried
-    models_source = (release / "hermes_cli" / "models.py").read_text(encoding="utf-8")
+    models_source = (release / "hermes_cli" / "models_catalog_static.py").read_text(encoding="utf-8")
     assert '"anthropic/claude-fable-5.1"' in models_source
     assert stamp_info.st_nlink == 1
     assert stat.S_IMODE(stamp_info.st_mode) == 0o600
