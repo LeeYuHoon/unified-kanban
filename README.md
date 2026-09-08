@@ -6,9 +6,9 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 
 ## 포함된 Hermes 버전
 
-- Hermes Agent: `0.21.0`
-- 공식 기반 commit: `79445a496c86a19332ad786494b8384d2167e2d0`
-- Unified Kanban release commit: `dfb94249a5fa3f0505c41896b6f4ec51c1b9a4be`
+- Hermes Agent: `0.21.1`
+- 공식 기반 commit: `2237be355906fbe6065ce1815711eee52b2d646e`
+- Unified Kanban release commit: `391dfc063dd3709d44eb8a729df58566ac801b8d`
 
 Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
 이 버전에는 Claude Fable 5.1 모델 목록 지원이 포함되어 있습니다.
