@@ -1,7 +1,7 @@
 format=unified-kanban-hermes-bootstrap-v1
-upstream=79445a496c86a19332ad786494b8384d2167e2d0
+upstream=2237be355906fbe6065ce1815711eee52b2d646e
 installer_sha256=5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968
-installer_url=https://raw.githubusercontent.com/NousResearch/hermes-agent/79445a496c86a19332ad786494b8384d2167e2d0/scripts/install.sh
+installer_url=https://raw.githubusercontent.com/NousResearch/hermes-agent/2237be355906fbe6065ce1815711eee52b2d646e/scripts/install.sh
 python_requirement=3.11
 node_major=26
 toolchain_resolution=moving-patch-and-tool-versions
