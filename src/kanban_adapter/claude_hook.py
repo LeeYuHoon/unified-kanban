@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -277,6 +278,8 @@ def _complete(
             tokens=tokens,
             unavailable=unavailable_categories(source),
             event_id=event_id,
+            usage_at=int(time.time()),
+            usage_timing="completion",
         )
         for attempt in range(3):
             try:

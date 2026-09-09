@@ -368,6 +368,9 @@ def test_claude_card_records_only_the_current_prompt_token_delta(
     update = next(argv for argv, _cwd in adapter.calls if argv[0] == "update")
     payload = json.loads(update[update.index("--message") + 1].split("\n", 1)[1])
     assert payload["schema_version"] == 2
+    assert "usage_at" not in payload
+    assert type(payload["completion_at"]) is int
+    assert payload["usage_timing"] == "completion"
     assert payload["tokens"] == {
         "input": 11,
         "output": 13,

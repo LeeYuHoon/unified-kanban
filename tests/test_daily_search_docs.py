@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_daily_search_documentation_contract():
     readme = (ROOT / "README.md").read_text()
-    assert "카드를 숨기지" in readme
+    assert "실행 카드와 함께 필터링" in readme
     assert "실측" in readme
     assert "선택일" in readme
     assert "전체기간 누적" in readme
@@ -17,7 +17,8 @@ def test_daily_search_documentation_contract():
     assert "docs/daily-search.md" in readme
     doc = (ROOT / "docs/daily-search.md").read_text()
     for term in ("/api/plugins/kanban/daily", "Asia/Seoul", "[start,end)",
-                 "usage_at", "생성일 추정", "undated_events", "HERMES_KANBAN_DB",
+                 "basis=execution", "task_runs", "usage_at", "생성일은 실행 증거가 아니며",
+                 "undated_events", "HERMES_KANBAN_DB", "CLAUDE", "CODEX", "모델미상",
                  "보관", "0", "N/A", "시연 데이터", "운영 미적용"):
         assert term in doc
 

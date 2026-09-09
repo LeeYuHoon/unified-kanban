@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import stat
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -391,6 +392,10 @@ class TurnTracker:
         turn_id: str,
         api_request_id: Any,
         usage: Any,
+        model: Any = None,
+        response_model: Any = None,
+        started_at: Any = None,
+        ended_at: Any = None,
         **_ignored: Any,
     ) -> None:
         """정규화된 ``post_api_request`` 사용량 페이로드 하나를 누적한다.
@@ -403,7 +408,9 @@ class TurnTracker:
             return
         if not isinstance(usage, Mapping):
             return
-        request_hash = hashlib.sha256(api_request_id.encode("utf-8")).hexdigest()[:16]
+        request_identity = f"{session_id}\0{turn_id}\0{api_request_id}"
+        request_hash = hashlib.sha256(request_identity.encode("utf-8")).hexdigest()[:16]
+        legacy_request_hash = hashlib.sha256(api_request_id.encode("utf-8")).hexdigest()[:16]
         incoming = clean_tokens({
             "input": usage.get("input_tokens"),
             "output": usage.get("output_tokens"),
@@ -415,6 +422,13 @@ class TurnTracker:
         })
         if not incoming:
             return
+        resolved_model = sanitize_model(response_model) or sanitize_model(model)
+        usage_at = next(
+            (int(value) for value in (ended_at, started_at)
+             if isinstance(value, (int, float)) and not isinstance(value, bool)
+             and 0 <= value < 253402214400),
+            None,
+        )
 
         def apply(state: dict[str, Any]) -> bool:
             raw_ids = state.get("token_request_ids")
@@ -423,7 +437,7 @@ class TurnTracker:
                 if isinstance(raw_ids, list)
                 else []
             )
-            if request_hash in request_ids:
+            if request_hash in request_ids or legacy_request_hash in request_ids:
                 return False
             if len(request_ids) >= 512:
                 # 오래된 id를 버리기를 거부한다: 버리면 나중의 재생이 두 번
@@ -432,6 +446,14 @@ class TurnTracker:
                 logger.warning("Hermes Kanban token request cap reached")
                 return False
             request_ids.append(request_hash)
+            raw_events = state.get("token_events")
+            token_events = list(raw_events) if isinstance(raw_events, list) else []
+            token_events.append({
+                "request_hash": request_hash,
+                "tokens": incoming,
+                "model": resolved_model,
+                "usage_at": usage_at,
+            })
             current = clean_tokens(state.get("tokens"))
             merged: dict[str, int | None] = {}
             for field in (
@@ -448,6 +470,7 @@ class TurnTracker:
                 merged[field] = value + (existing if isinstance(existing, int) else 0)
             state["tokens"] = clean_tokens(merged)
             state["token_request_ids"] = request_ids
+            state["token_events"] = token_events
             return True
 
         self._mutate(session_id, turn_id, apply)
@@ -464,37 +487,73 @@ class TurnTracker:
         usage = clean_usage(state.get("usage"))
         if state.get("usage_comment_posted") is True:
             return identity
-        if not has_reportable_usage(_SOURCE, usage):
-            return identity
         # Hermes는 코멘트 삽입과 동일한 DB 쓰기 트랜잭션 안에서 키를
         # 강제하므로, 동시 재시도나 크래시 이후의 재시도가 중복을 만들 수
         # 없다.
-        event_id = usage_event_id(_SOURCE, task_id)
-        message = usage_comment(
-            source=_SOURCE,
-            model=state.get("model"),
-            usage=usage,
-            tokens=clean_tokens(state.get("tokens")),
-            unavailable=unavailable_categories(_SOURCE),
-            event_id=event_id,
-        )
-        for attempt in range(3):
-            try:
-                self.runner([
-                    "hermes", "kanban", "--board", board, "comment",
-                    "--author", "hermes-agent",
-                    f"--idempotency-key={event_id}",
-                    "--", task_id, message,
-                ])
-            except Exception as exc:
-                if attempt == 2:
-                    # 제한된 재시도 이후에는 텔레메트리가 카드를 고아로
-                    # 만들어서는 안 된다.
-                    logger.warning("Hermes Kanban usage comment failed: %s", exc)
+        raw_events = state.get("token_events")
+        token_events = raw_events if isinstance(raw_events, list) else []
+        aggregate = clean_tokens(state.get("tokens"))
+        event_totals: dict[str, int] = {}
+        for event in token_events:
+            if not isinstance(event, Mapping):
                 continue
-            break
-        else:
+            for field, value in clean_tokens(event.get("tokens")).items():
+                if isinstance(value, int):
+                    event_totals[field] = event_totals.get(field, 0) + value
+        residual = clean_tokens({
+            field: max(value - event_totals.get(field, 0), 0)
+            for field, value in aggregate.items()
+            if isinstance(value, int) and value > event_totals.get(field, 0)
+        })
+        if not has_reportable_usage(_SOURCE, usage) and not token_events and not residual:
             return identity
+        comments: list[tuple[str, str]] = []
+        if token_events:
+            for index, event in enumerate(token_events):
+                if not isinstance(event, Mapping):
+                    continue
+                request_hash = event.get("request_hash")
+                event_id = usage_event_id(_SOURCE, task_id, request_hash)
+                comments.append((event_id, usage_comment(
+                    source=_SOURCE,
+                    model=event.get("model"),
+                    usage=usage if index == 0 else {},
+                    tokens=event.get("tokens"),
+                    unavailable=unavailable_categories(_SOURCE),
+                    event_id=event_id,
+                    request_hash=request_hash,
+                    usage_at=event.get("usage_at"),
+                    usage_timing="request",
+                )))
+        if residual:
+            event_id = usage_event_id(_SOURCE, task_id)
+            comments.append((event_id, usage_comment(
+                source=_SOURCE, model=None, usage=usage if not comments else {},
+                tokens=residual, unavailable=unavailable_categories(_SOURCE),
+                event_id=event_id,
+            )))
+        elif not comments:
+            event_id = usage_event_id(_SOURCE, task_id)
+            comments.append((event_id, usage_comment(
+                source=_SOURCE, model=state.get("model"), usage=usage,
+                unavailable=unavailable_categories(_SOURCE), event_id=event_id,
+            )))
+        for event_id, message in comments:
+            for attempt in range(3):
+                try:
+                    self.runner([
+                        "hermes", "kanban", "--board", board, "comment",
+                        "--author", "hermes-agent",
+                        f"--idempotency-key={event_id}",
+                        "--", task_id, message,
+                    ])
+                except Exception as exc:
+                    if attempt == 2:
+                        logger.warning("Hermes Kanban usage comment failed: %s", exc)
+                    continue
+                break
+            else:
+                return identity
         state["usage_comment_posted"] = True
         try:
             return self._write_state(

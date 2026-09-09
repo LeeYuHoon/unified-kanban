@@ -160,6 +160,10 @@ def test_codex_card_records_cumulative_token_delta(tmp_path: Path, monkeypatch) 
         "requests": 1,
         "total": 180,
     }
+    payload = usage_payload(adapter)
+    assert "usage_at" not in payload
+    assert type(payload["completion_at"]) is int
+    assert payload["usage_timing"] == "completion"
 
 
 def test_post_tool_use_records_mcp_and_subagent_start_records_agents(
