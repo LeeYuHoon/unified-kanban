@@ -6,7 +6,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_daily_search_documentation_contract():
     readme = (ROOT / "README.md").read_text()
-    assert "전체기간" in readme
+    assert "카드를 숨기지" in readme
+    assert "실측" in readme
+    assert "선택일" in readme
+    assert "전체기간 누적" in readme
+    assert "모델미상" in readme
+    assert "더하지" in readme
+    assert "전체 보드 조작 보기" not in readme
     assert "오늘" in readme
     assert "docs/daily-search.md" in readme
     doc = (ROOT / "docs/daily-search.md").read_text()
