@@ -165,6 +165,8 @@ def test_plugin_forwards_usage_hooks_without_raw_payloads() -> None:
     registered["post_api_request"](
         session_id="s1", turn_id="u1", api_request_id="req-1",
         usage={"input_tokens": 12, "output_tokens": 7},
+        model="claude-sonnet-4-5", response_model="claude-sonnet-4-5",
+        started_at=100.25, ended_at=101.75,
         messages=["secret prompt"], response={"secret": "payload"},
     )
 
@@ -184,6 +186,8 @@ def test_plugin_forwards_usage_hooks_without_raw_payloads() -> None:
         ("record_api_usage", {
             "session_id": "s1", "turn_id": "u1", "api_request_id": "req-1",
             "usage": {"input_tokens": 12, "output_tokens": 7},
+            "model": "claude-sonnet-4-5", "response_model": "claude-sonnet-4-5",
+            "started_at": 100.25, "ended_at": 101.75,
         }),
     ]
 

@@ -613,14 +613,19 @@ def usage_comment_header(source: Any) -> str:
     return _SOURCE_HEADERS.get(source, USAGE_COMMENT_HEADER)
 
 
-def usage_event_id(source: Any, task_id: Any) -> str:
+def usage_event_id(source: Any, task_id: Any, request_hash: Any = None) -> str:
     """카드 하나의 단일 usage 코멘트를 위한 결정론적 마커.
 
     카드 자신의 정체성에서만 파생되므로, 같은 카드에 대한 모든 재시도는
     -- 크래시 이후든, 마커 기록 실패 이후든, 재실행된 훅이든 -- 같은 값을
     다시 계산하고 자신이 이미 게시한 코멘트를 알아볼 수 있다.
     """
-    digest = hashlib.sha256(f"{source}\0{task_id}".encode("utf-8")).hexdigest()
+    suffix = (
+        f"\0{request_hash}"
+        if isinstance(request_hash, str) and re.fullmatch(r"[0-9a-f]{16}", request_hash)
+        else ""
+    )
+    digest = hashlib.sha256(f"{source}\0{task_id}{suffix}".encode("utf-8")).hexdigest()
     return f"usage-{digest[:32]}"
 
 
@@ -637,6 +642,9 @@ def usage_comment(
     tokens: Any = None,
     unavailable: Iterable[str] = (),
     event_id: str | None = None,
+    request_hash: str | None = None,
+    usage_at: int | None = None,
+    usage_timing: str | None = None,
 ) -> str:
     """그 턴이 무엇을 사용했는지 밝히는, 크기가 제한된 구조화 코멘트 본문 하나.
 
@@ -657,11 +665,21 @@ def usage_comment(
     clean_event_id = sanitize_event_id(event_id)
     if clean_event_id:
         header["event_id"] = clean_event_id
+    if isinstance(request_hash, str) and re.fullmatch(r"[0-9a-f]{16}", request_hash):
+        header["request_hash"] = request_hash
     resolved_model = sanitize_model(model)
     if resolved_model:
         header["model"] = resolved_model
     if cleaned_tokens:
         header["tokens"] = cleaned_tokens
+        if type(usage_at) is int and 0 <= usage_at < 253402214400:
+            if usage_timing == "completion":
+                header["completion_at"] = usage_at
+                header["usage_timing"] = usage_timing
+            else:
+                header["usage_at"] = usage_at
+                if usage_timing == "request":
+                    header["usage_timing"] = usage_timing
     missing = sorted({c for c in unavailable if c in USAGE_CATEGORIES})
     if missing:
         header["unavailable"] = missing

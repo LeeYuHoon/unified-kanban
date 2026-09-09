@@ -111,6 +111,10 @@ def _on_post_api_request(**kwargs):
             turn_id=kwargs.get("turn_id") or "",
             api_request_id=kwargs.get("api_request_id") or "",
             usage=kwargs.get("usage"),
+            model=kwargs.get("model"),
+            response_model=kwargs.get("response_model"),
+            started_at=kwargs.get("started_at"),
+            ended_at=kwargs.get("ended_at"),
         )
     except Exception:
         logger.warning("Hermes Kanban token usage record failed")

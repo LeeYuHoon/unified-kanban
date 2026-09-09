@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 from pathlib import Path
 
@@ -89,6 +90,13 @@ def state_of(tmp_path: Path) -> dict:
     return json.loads(next((tmp_path / "cache").glob("*.json")).read_text("utf-8"))
 
 
+def replace_state(tmp_path: Path, update: dict) -> None:
+    path = next((tmp_path / "cache").glob("*.json"))
+    state = json.loads(path.read_text("utf-8"))
+    state.update(update)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
 def comment_of(calls: list[list[str]]) -> str:
     comments = [call for call in calls if "comment" in call]
     assert comments
@@ -118,6 +126,14 @@ def usage_payload(calls: list[list[str]], *, task_id: str = "t_12345678") -> dic
     assert payload.pop("schema_version") == expected_version
     assert payload.pop("event_id") == usage_event_id("hermes-agent", task_id)
     return payload
+
+
+def token_payloads(calls: list[list[str]]) -> list[dict]:
+    return [
+        json.loads(call[-1].split("\n", 1)[1])
+        for call in calls
+        if "comment" in call and '"tokens"' in call[-1]
+    ]
 
 
 def test_start_bounds_prompt_derived_card_title_to_120_characters(tmp_path: Path) -> None:
@@ -264,7 +280,10 @@ def test_post_api_request_accumulates_tokens_once_per_request(tmp_path: Path) ->
     assert all(len(value) == 16 for value in request_ids)
     tracker.finish(session_id="s1", turn_id="t1", completed=True, interrupted=False)
 
-    assert usage_payload(calls)["tokens"] == {
+    payloads = token_payloads(calls)
+    assert len(payloads) == 2
+    assert {field: sum(payload["tokens"].get(field) or 0 for payload in payloads)
+            for field in ("input", "output", "cache_read", "cache_write", "reasoning", "requests", "total")} == {
         "input": 15,
         "output": 20,
         "cache_read": 24,
@@ -273,6 +292,144 @@ def test_post_api_request_accumulates_tokens_once_per_request(tmp_path: Path) ->
         "requests": 2,
         "total": 99,
     }
+    assert all("usage_timing" not in payload and "usage_at" not in payload for payload in payloads)
+
+
+def test_post_api_request_preserves_each_request_model_day_and_replay_identity(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    tracker = make_tracker(tmp_path, calls)
+    start_turn(tracker, model="gpt-5.6-sol")
+
+    first = {"input_tokens": 100, "total_tokens": 100}
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id="request-claude",
+        usage=first, model="claude-sonnet-4-5", response_model="claude-sonnet-4-5",
+        started_at=1788879600.0, ended_at=1788880200.0,
+    )
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id="request-claude",
+        usage=first, model="claude-sonnet-4-5", response_model="claude-sonnet-4-5",
+        started_at=1788879600.0, ended_at=1788880200.0,
+    )
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id="request-gpt",
+        usage={"input_tokens": 200, "total_tokens": 200},
+        model="gpt-5.6-sol", response_model="gpt-5.6-sol",
+        started_at=1788966000.0, ended_at=1788966600.0,
+    )
+    tracker.finish(session_id="s1", turn_id="t1", completed=True, interrupted=False)
+
+    payloads = token_payloads(calls)
+    assert [(p["model"], p["tokens"]["total"], p["usage_at"], p["usage_timing"])
+            for p in payloads] == [
+        ("claude-sonnet-4-5", 100, 1788880200, "request"),
+        ("gpt-5.6-sol", 200, 1788966600, "request"),
+    ]
+    assert [p["request_hash"] for p in payloads] == [
+        hashlib.sha256(f"s1\0t1\0{value}".encode()).hexdigest()[:16]
+        for value in ("request-claude", "request-gpt")
+    ]
+    assert len({p["event_id"] for p in payloads}) == 2
+
+
+def test_finish_preserves_legacy_accumulated_tokens_as_undated_unknown(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    tracker = make_tracker(tmp_path, calls)
+    start_turn(tracker, model="gpt-last-model")
+    replace_state(tmp_path, {
+        "tokens": {"input": 321, "output": 9, "total": 330},
+        "token_request_ids": ["0123456789abcdef"],
+    })
+
+    tracker.finish(session_id="s1", turn_id="t1", completed=True, interrupted=False)
+
+    payloads = token_payloads(calls)
+    assert len(payloads) == 1
+    assert payloads[0]["tokens"] == {"input": 321, "output": 9, "total": 330}
+    assert "model" not in payloads[0]
+    assert "usage_at" not in payloads[0]
+    assert "usage_timing" not in payloads[0]
+
+
+def test_finish_splits_mixed_legacy_residual_from_request_events_and_retry_dedupes(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    tracker = make_tracker(tmp_path, calls, fail={"complete"})
+    start_turn(tracker, model="gpt-last-model")
+    replace_state(tmp_path, {
+        "tokens": {"input": 321, "output": 9, "total": 330},
+        "token_request_ids": ["0123456789abcdef"],
+    })
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id="new-request",
+        usage={"input_tokens": 100, "total_tokens": 100},
+        response_model="claude-sonnet-4-5", ended_at=1788965400,
+    )
+
+    for _ in range(2):
+        try:
+            tracker.finish(session_id="s1", turn_id="t1", completed=True, interrupted=False)
+        except RuntimeError:
+            pass
+
+    payloads = token_payloads(calls)
+    unique = {payload["event_id"]: payload for payload in payloads}
+    assert len(unique) == 2
+    assert sorted(payload["tokens"]["total"] for payload in unique.values()) == [100, 330]
+    request = next(payload for payload in unique.values() if payload.get("usage_timing") == "request")
+    legacy = next(payload for payload in unique.values() if "usage_timing" not in payload)
+    assert request["model"] == "claude-sonnet-4-5"
+    assert request["usage_at"] == 1788965400
+    assert "model" not in legacy and "usage_at" not in legacy
+
+
+def test_legacy_request_replay_is_not_duplicated_after_hash_upgrade(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    tracker = make_tracker(tmp_path, calls, fail={"complete"})
+    start_turn(tracker, model="gpt-last-model")
+    old_request_id = "old-request"
+    old_request_hash = hashlib.sha256(old_request_id.encode()).hexdigest()[:16]
+    replace_state(tmp_path, {
+        "tokens": {"input": 321, "output": 9, "requests": 1, "total": 330},
+        "token_request_ids": [old_request_hash],
+    })
+
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id=old_request_id,
+        usage={"input_tokens": 321, "output_tokens": 9, "total_tokens": 330},
+        response_model="replayed-model", ended_at=1788965300,
+    )
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id="new-request",
+        usage={"input_tokens": 100, "total_tokens": 100},
+        response_model="new-model", ended_at=1788965400,
+    )
+
+    state = state_of(tmp_path)
+    assert state["tokens"] == {
+        "input": 421, "output": 9, "cache_read": None, "cache_write": None,
+        "reasoning": None, "requests": 2, "total": 430,
+    }
+    assert state["token_request_ids"] == [
+        old_request_hash,
+        hashlib.sha256(b"s1\0t1\0new-request").hexdigest()[:16],
+    ]
+    assert [event["tokens"]["total"] for event in state["token_events"]] == [100]
+
+    for _ in range(2):
+        try:
+            tracker.finish(session_id="s1", turn_id="t1", completed=True, interrupted=False)
+        except RuntimeError:
+            pass
+
+    unique = {payload["event_id"]: payload for payload in token_payloads(calls)}
+    assert len(unique) == 2
+    dated = next(payload for payload in unique.values() if payload.get("usage_timing") == "request")
+    undated = next(payload for payload in unique.values() if "usage_timing" not in payload)
+    assert dated["tokens"]["total"] == 100
+    assert dated["model"] == "new-model"
+    assert dated["usage_at"] == 1788965400
+    assert undated["tokens"]["total"] == 330
+    assert "model" not in undated and "usage_at" not in undated
 
 
 def test_finish_posts_usage_comment_then_completes_with_summary(
