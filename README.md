@@ -8,7 +8,7 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 
 - Hermes Agent: `0.21.1`
 - 공식 기반 commit: `f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140`
-- Unified Kanban release commit: `f9ab37d661d16a09014a0859f49064e8ca1ed7b8`
+- Unified Kanban release commit: `3b76df96b074d192d22b95e0d181ab8eac12b063`
 
 Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
 이 버전에는 Claude Fable 5.1 모델 목록 지원이 포함되어 있습니다.
@@ -86,6 +86,16 @@ HERMES_AGENT_REPO="/absolute/path/to/hermes-agent" ./scripts/setup.sh
 설치가 끝나면 실행 중인 Hermes CLI/TUI/Desktop, Claude Code, Codex CLI를 모두 종료하고 다시 여세요.
 
 ## 사용 방법
+
+### 날짜와 검색으로 찾기
+
+상황판은 기본으로 **현재 보드의 오늘 생성된 카드**를 보여 줍니다. 이전 카드는 지워진 것이 아닙니다. 기간에서 **전체기간**을 고르면 다시 볼 수 있습니다.
+
+오늘·어제·최근 7일·이번 달·직접 선택으로 기간을 고르고 제목·본문을 검색하세요. 보드 범위, 작업 도구와 상태도 좁힐 수 있습니다. 날짜를 누르면 그날 카드만 보이고, 위의 선택기간 요약은 유지됩니다. 시간대 기본값은 **Asia/Seoul**입니다.
+
+생성 수와 완료 수는 따로 셉니다. 토큰은 실제 사용시각이 없으면 **카드 생성일 추정량**으로 나누어 보여 줍니다. `N/A`는 미수집이며 0과 다릅니다. 기존 카드 이동·편집은 **전체 보드 조작 보기**에 있습니다.
+
+자세한 기준과 검증은 [날짜·검색 안내](docs/daily-search.md)를 보세요. 저장소 업데이트와 실제 설치 적용은 별도 단계이며, 설치된 버전은 `hermes --version`의 설치 경로로 확인할 수 있습니다.
 
 터미널에서 다음 명령으로 Dashboard를 엽니다.
 
