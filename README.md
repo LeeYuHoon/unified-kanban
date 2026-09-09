@@ -7,8 +7,8 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 ## 포함된 Hermes 버전
 
 - Hermes Agent: `0.21.1`
-- 공식 기반 commit: `2237be355906fbe6065ce1815711eee52b2d646e`
-- Unified Kanban release commit: `391dfc063dd3709d44eb8a729df58566ac801b8d`
+- 공식 기반 commit: `f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140`
+- Unified Kanban release commit: `f9ab37d661d16a09014a0859f49064e8ca1ed7b8`
 
 Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
 이 버전에는 Claude Fable 5.1 모델 목록 지원이 포함되어 있습니다.
@@ -98,6 +98,8 @@ hermes dashboard
 3. 해당 작업 폴더에서 Hermes Agent, Claude Code 또는 Codex를 실행합니다.
 
 이제 실제 사용자 요청마다 카드가 생기고 작업이 끝나면 결과가 기록됩니다. 카드에는 최종 응답이 남으므로 비밀번호, API 키와 같은 민감정보를 요청이나 응답에 넣지 마세요.
+
+외부 CLI 작업은 **관찰 카드**로 기록됩니다. 조회·댓글·설명 편집과 기록의 완료·보관·삭제는 가능하지만, 대시보드에서 외부 작업을 재실행하거나 담당자·모델을 바꾸고 작업 상태를 이동·드래그할 수는 없습니다. 실제 작업은 원래 CLI에서 관리합니다.
 
 설치 상태를 다시 확인하려면 다음 명령을 실행하세요.
 
