@@ -8,7 +8,7 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 
 - Hermes Agent: `0.21.1`
 - 공식 기반 commit: `f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140`
-- Unified Kanban release commit: `7706053948edf90a7e347fa718b30141bc0bb274`
+- Unified Kanban release commit: `f48f87460ca9f8c46d86d90e79e66430b66132bd`
 
 Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
 이 버전에는 Claude Fable 5.1 모델 목록 지원이 포함되어 있습니다.
@@ -94,6 +94,8 @@ HERMES_AGENT_REPO="/absolute/path/to/hermes-agent" ./scripts/setup.sh
 두 요약 모두 전체·입력·캐시·출력·추론과 실행 경로별 토큰·카드 수를 보여 줍니다. Claude Code는 CLAUDE, Codex는 CODEX, Hermes는 기록된 실제 모델에 따라 CLAUDE·CODEX·모델미상·기타로 분류하며 각 이벤트는 한 번만 셉니다. 누적과 선택일은 서로 겹치므로 더하지 않습니다.
 
 실제 사용시각이 기록된 수집분만 선택일 토큰으로 표시합니다. **N/A**는 확인할 수 없다는 뜻이며 0과 다릅니다. 실행 기록은 있지만 토큰 이벤트가 없으면 `토큰 수집 안 됨`, 미래 날짜에 실행이 없으면 `기록된 실행 없음`, 실패하면 `조회 실패`로 구분합니다. 과거 기록의 생성일 추정량은 실측에 합치거나 소급 보정하지 않습니다.
+
+카드의 **모델 설정**은 다음 실행에 쓸 override이고, **실제 사용 모델**은 usage에서 관측된 값입니다. 여러 모델은 모두 표시하며 기록이 없으면 추측하지 않고 **미확인**으로 둡니다.
 
 토큰은 **K(천)·M(백만)·B(십억)** 단위로 표시합니다. Hermes는 각 API 요청의 실제 모델·종료시각과 delta를 별도 이벤트로 기록합니다. Claude·Codex의 완료 시점 누적 snapshot과 날짜 없는 과거 사용량은 누적에는 남지만 선택일 실측에는 포함하지 않고 완료 귀속 또는 미수집으로 구분합니다.
 
