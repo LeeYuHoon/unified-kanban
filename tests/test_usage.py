@@ -83,6 +83,110 @@ def test_usage_comment_includes_sanitized_token_breakdown() -> None:
     }
 
 
+def test_usage_comment_carries_valid_usd_cost_without_currency_display_text() -> None:
+    payload = json.loads(usage_comment(
+        source="hermes-agent", model="claude-sonnet-4-5", usage={},
+        tokens={"input": 1, "output": 2},
+        cost={"amount_usd": 0.000045, "currency": "USD", "status": "reported",
+              "source": "provider_recorded", "coverage": "complete",
+              "components": {"input": None, "cache_read": None,
+                             "cache_write": None, "output": None}},
+    ).split("\n", 1)[1])
+    assert payload["cost"]["amount_usd"] == 0.000045
+    assert payload["cost"]["currency"] == "USD"
+
+
+@pytest.mark.parametrize("cost", [
+    {"amount_usd": -1, "currency": "USD", "status": "reported", "source": "provider_recorded"},
+    {"amount_usd": float("inf"), "currency": "USD", "status": "reported", "source": "provider_recorded"},
+    {"amount_usd": 1, "currency": "KRW", "status": "reported", "source": "provider_recorded"},
+    {"amount_usd": 10**400, "currency": "USD", "status": "reported", "source": "provider_recorded"},
+])
+def test_usage_comment_preserves_malformed_cost_as_unknown_instead_of_serializing_zero(cost) -> None:
+    payload = json.loads(usage_comment(
+        source="hermes-agent", model="claude-sonnet-4-5", usage={},
+        tokens={"input": 1}, cost=cost,
+    ).split("\n", 1)[1])
+    assert payload["tokens"]["total"] == 1
+    assert payload["cost"] == {
+        "amount_usd": None,
+        "currency": "USD",
+        "status": "unknown",
+        "source": "invalid_payload",
+        "coverage": "unavailable",
+        "components": {
+            "input": None, "cache_read": None, "cache_write": None, "output": None,
+        },
+    }
+
+
+def test_usage_comment_keeps_absent_cost_distinct_from_invalid_cost() -> None:
+    payload = json.loads(usage_comment(
+        source="hermes-agent", model="claude-sonnet-4-5", usage={}, tokens={"input": 1},
+    ).split("\n", 1)[1])
+    assert "cost" not in payload
+
+
+def test_usage_comment_preserves_bounded_pricing_evidence_for_new_estimates() -> None:
+    cost = {
+        "amount_usd": 0.45, "currency": "USD", "status": "estimated",
+        "source": "official_pricing", "coverage": "complete",
+        "components": {"input": 0.3, "cache_read": 0.0, "cache_write": None, "output": 0.15},
+        "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "model_source_url": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+        "pricing_version": "anthropic-direct-standard-post-1m-retirement-2026-09-11",
+        "pricing_evidence": {
+            "schema_version": 1, "provider": "anthropic", "model": "claude-sonnet-4-5",
+            "pricing_route": "anthropic_direct", "api_host": "api.anthropic.com",
+            "usage_scope": "request", "context_tier": "standard",
+            "context_input_tokens": 100_000, "context_limit_tokens": 200_000,
+            "collected_at": 1_789_100_000,
+            "tier_basis": "sonnet-4.5-standard-limit-after-1m-retirement",
+        },
+    }
+    payload = json.loads(usage_comment(
+        source="hermes-agent", model="claude-sonnet-4-5", usage={},
+        tokens={"input": 100_000, "output": 10_000}, cost=cost,
+        usage_timing="request", usage_at=1_789_100_000,
+    ).split("\n", 1)[1])
+    assert payload["cost"] == cost
+
+
+@pytest.mark.parametrize("field", ["status", "source", "coverage"])
+@pytest.mark.parametrize("bad", [[], {}, None, True, 1])
+def test_usage_comment_canonicalizes_json_cost_enums_without_losing_tokens(
+    field, bad,
+) -> None:
+    cost = {
+        "amount_usd": 1,
+        "currency": "USD",
+        "status": "reported",
+        "source": "provider_recorded",
+        "coverage": "complete",
+        "components": {
+            name: None for name in ("input", "cache_read", "cache_write", "output")
+        },
+    }
+    if field == "source":
+        cost.update(amount_usd=None, status="unknown", coverage="unavailable")
+    cost[field] = bad
+
+    payload = json.loads(usage_comment(
+        source="hermes-agent",
+        model="claude-sonnet-4-5",
+        usage={},
+        tokens={"input": 999, "output": 1, "total": 1_000},
+        event_id="usage-1234567890abcdef1234567890abcdef",
+        cost=cost,
+    ).split("\n", 1)[1])
+
+    assert payload["tokens"]["total"] == 1_000
+    assert payload["cost"]["status"] == "unknown"
+    assert payload["cost"]["source"] == "invalid_payload"
+    assert payload["cost"]["amount_usd"] is None
+    json.dumps(payload, allow_nan=False)
+
+
 # 적대적이거나 잘못된 런타임이 이름 자리에 넣을 수 있는 값이다. 어느 것도 유효한
 # 식별자가 아니므로 상태나 주석에 절대 도달해서는 안 된다.
 HOSTILE_NAMES = [
