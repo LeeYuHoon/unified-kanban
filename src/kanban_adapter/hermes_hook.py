@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import stat
-import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,7 @@ from .usage import (
     bump,
     classify_subagent,
     classify_tool,
+    clean_cost,
     clean_tokens,
     clean_usage,
     concise_summary,
@@ -423,6 +423,7 @@ class TurnTracker:
         if not incoming:
             return
         resolved_model = sanitize_model(response_model) or sanitize_model(model)
+        resolved_cost = clean_cost(usage.get("cost"))
         usage_at = next(
             (int(value) for value in (ended_at, started_at)
              if isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -453,6 +454,7 @@ class TurnTracker:
                 "tokens": incoming,
                 "model": resolved_model,
                 "usage_at": usage_at,
+                **({"cost": resolved_cost} if resolved_cost else {}),
             })
             current = clean_tokens(state.get("tokens"))
             merged: dict[str, int | None] = {}
@@ -524,6 +526,7 @@ class TurnTracker:
                     request_hash=request_hash,
                     usage_at=event.get("usage_at"),
                     usage_timing="request",
+                    cost=event.get("cost"),
                 )))
         if residual:
             event_id = usage_event_id(_SOURCE, task_id)

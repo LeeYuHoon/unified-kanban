@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -373,6 +374,109 @@ def clean_tokens(tokens: Any) -> dict[str, int | None]:
     return cleaned
 
 
+_COST_COMPONENTS = ("input", "cache_read", "cache_write", "output")
+_UNKNOWN_COST_SOURCES = {
+    "none", "invalid_payload", "invalid_provider_cost", "pricing_evidence_insufficient",
+    "invalid_pricing_evidence", "aggregate_unrepresentable",
+}
+
+
+def _invalid_cost() -> dict[str, Any]:
+    return {
+        "amount_usd": None, "currency": "USD", "status": "unknown",
+        "source": "invalid_payload", "coverage": "unavailable",
+        "components": {field: None for field in _COST_COMPONENTS},
+    }
+
+
+def _cost_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def clean_cost(cost: Any) -> dict[str, Any]:
+    """비용의 누락과 손상을 구분해 검증 provenance를 끝까지 보존한다."""
+    if cost is None:
+        return {}
+    if not isinstance(cost, Mapping):
+        return _invalid_cost()
+    currency = cost.get("currency")
+    status = cost.get("status")
+    source = cost.get("source")
+    coverage = cost.get("coverage")
+    if (
+        not isinstance(currency, str)
+        or not isinstance(status, str)
+        or not isinstance(source, str)
+        or not isinstance(coverage, str)
+        or currency != "USD"
+    ):
+        return _invalid_cost()
+    if status == "unknown" and source in _UNKNOWN_COST_SOURCES:
+        if coverage != "unavailable":
+            return _invalid_cost()
+        return {
+            "amount_usd": None, "currency": "USD", "status": "unknown", "source": source,
+            "coverage": "unavailable", "components": {field: None for field in _COST_COMPONENTS},
+        }
+    if status not in {"reported", "estimated"} or source not in {
+        "provider_recorded", "official_pricing",
+    }:
+        return _invalid_cost()
+    amount = _cost_number(cost.get("amount_usd"))
+    if amount is None:
+        return _invalid_cost()
+    if coverage not in {"complete", "partial"}:
+        return _invalid_cost()
+    raw_components = cost.get("components")
+    if not isinstance(raw_components, Mapping):
+        return _invalid_cost()
+    components: dict[str, float | None] = {}
+    for field in _COST_COMPONENTS:
+        value = raw_components.get(field)
+        if value is None:
+            components[field] = None
+        else:
+            number = _cost_number(value)
+            if number is None:
+                return _invalid_cost()
+            components[field] = number
+    cleaned: dict[str, Any] = {
+        "amount_usd": amount, "currency": "USD", "status": status,
+        "source": source, "coverage": coverage, "components": components,
+    }
+    for field in ("source_url", "model_source_url", "pricing_version"):
+        value = cost.get(field)
+        if isinstance(value, str) and 0 < len(value) <= 256:
+            cleaned[field] = value
+    if status == "estimated":
+        evidence = cost.get("pricing_evidence")
+        if not isinstance(evidence, Mapping):
+            return _invalid_cost()
+        clean_evidence: dict[str, Any] = {}
+        for field in (
+            "provider", "model", "pricing_route", "api_host", "usage_scope", "context_tier", "tier_basis",
+        ):
+            value = evidence.get(field)
+            if not isinstance(value, str) or not 0 < len(value) <= 128:
+                return _invalid_cost()
+            clean_evidence[field] = value
+        for field in (
+            "schema_version", "context_input_tokens", "context_limit_tokens", "collected_at",
+        ):
+            value = evidence.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > _TOKEN_COUNT_LIMIT:
+                return _invalid_cost()
+            clean_evidence[field] = value
+        cleaned["pricing_evidence"] = clean_evidence
+    return cleaned
+
+
 def sanitize_model(model: Any) -> str | None:
     if not isinstance(model, str):
         return None
@@ -630,7 +734,7 @@ def usage_event_id(source: Any, task_id: Any, request_hash: Any = None) -> str:
 
 
 def _render(source: Any, payload: dict[str, Any]) -> str:
-    body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
     return f"{usage_comment_header(source)}\n{body}"
 
 
@@ -645,6 +749,7 @@ def usage_comment(
     request_hash: str | None = None,
     usage_at: int | None = None,
     usage_timing: str | None = None,
+    cost: Any = None,
 ) -> str:
     """그 턴이 무엇을 사용했는지 밝히는, 크기가 제한된 구조화 코멘트 본문 하나.
 
@@ -672,6 +777,9 @@ def usage_comment(
         header["model"] = resolved_model
     if cleaned_tokens:
         header["tokens"] = cleaned_tokens
+        cleaned_cost = clean_cost(cost)
+        if cleaned_cost:
+            header["cost"] = cleaned_cost
         if type(usage_at) is int and 0 <= usage_at < 253402214400:
             if usage_timing == "completion":
                 header["completion_at"] = usage_at

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import threading
 from pathlib import Path
 
@@ -349,6 +349,30 @@ def test_finish_preserves_legacy_accumulated_tokens_as_undated_unknown(tmp_path:
     assert "model" not in payloads[0]
     assert "usage_at" not in payloads[0]
     assert "usage_timing" not in payloads[0]
+
+
+def test_invalid_request_cost_provenance_survives_state_and_comment(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    tracker = make_tracker(tmp_path, calls)
+    start_turn(tracker, model="claude-sonnet-4-5")
+    tracker.record_api_usage(
+        session_id="s1", turn_id="t1", api_request_id="bad-cost",
+        usage={
+            "input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
+            "cost": {"amount_usd": -1, "currency": "USD", "status": "reported",
+                     "source": "provider_recorded", "coverage": "complete"},
+        },
+        response_model="claude-sonnet-4-5", ended_at=1_789_100_000,
+    )
+
+    stored = state_of(tmp_path)["token_events"][0]
+    assert stored["tokens"]["total"] == 110
+    assert stored["cost"]["source"] == "invalid_payload"
+    tracker.finish(session_id="s1", turn_id="t1", completed=True, interrupted=False)
+    payload = token_payloads(calls)[0]
+    assert payload["tokens"]["total"] == 110
+    assert payload["cost"]["amount_usd"] is None
+    assert payload["cost"]["source"] == "invalid_payload"
 
 
 def test_finish_splits_mixed_legacy_residual_from_request_events_and_retry_dedupes(tmp_path: Path) -> None:
