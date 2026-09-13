@@ -6,6 +6,11 @@ All notable user-visible changes to this project will be documented here. The fo
 
 ### Added
 
+- Hermes Agent `0.21.1`, 공식 기반 `f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140` 위 대화 수집 release 후보를 준비했다. 최신 upstream 갱신은 이번 배포 이후 별도 검토한다.
+- Claude Code·Codex의 서명된 대화 구간과 Hermes 네이티브 관찰 기록을 카드에서 조회한다. 과거 대화는 소급 수집하지 않는다.
+- Claude 시작 시 transcript가 없으면 검증된 이후 구간만 부분 기록으로 표시한다. 최종 응답이 수집되지 않았을 때 카드 결과로 대화 응답을 만들어 채우지 않는다.
+- 외부 대화 binding이 아직 없으면 비공개 캐시 금지 헤더를 포함한 HTTP 503으로 응답하고, binding이 생긴 뒤 다시 조회할 수 있다.
+
 - 분리된 Hermes Kanban 모듈과 현재 React 화면에 관찰 카드·보드별 토큰 표시를 이식했다.
 - Hermes Agent 0.21.0 호환성과 Claude Fable 5.1 모델 목록 지원.
 - Unified observation cards for Claude Code, Codex CLI, and Hermes Agent user turns.

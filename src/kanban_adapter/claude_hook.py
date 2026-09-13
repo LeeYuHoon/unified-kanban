@@ -11,12 +11,10 @@ import stat
 import subprocess
 import sys
 import time
-
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
-from .token_usage import TranscriptNotReady, token_delta, token_snapshot
 from .private_files import (
     CommittedPublicationError,
     Identity,
@@ -31,6 +29,7 @@ from .private_files import (
     restore_detached,
     validate_directory,
 )
+from .token_usage import TranscriptNotReady, token_delta, token_snapshot
 from .usage import (
     bump,
     classify_subagent,
@@ -52,10 +51,15 @@ _SOURCE_LABEL = {"claude-code": "Claude", "codex": "Codex"}
 
 
 def _create_idempotency_key(
-    source: str, session_id: str, cwd: Path, prompt: str
+    source: str, session_id: str, cwd: Path, prompt: str, prompt_id: object = None
 ) -> str:
+    values = ["unified-kanban/claude-create/v2", source, session_id, str(cwd), prompt]
+    if source == "claude-code" and isinstance(prompt_id, str):
+        from .claude_absent import _UUID
+        if _UUID.fullmatch(prompt_id):
+            values = ["unified-kanban/claude-create/v3", source, session_id, str(cwd), prompt_id]
     encoded = json.dumps(
-        ["unified-kanban/claude-create/v2", source, session_id, str(cwd), prompt],
+        values,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -63,8 +67,20 @@ def _create_idempotency_key(
 
 
 def run_adapter(argv: list[str], cwd: Path) -> str:
-    """설치된 어댑터를 이벤트의 프로젝트 디렉터리에서 호출한다."""
-    adapter = Path.home() / ".local/bin/kanban-adapter"
+    """현재 모듈과 같은 저장소의 호환성 래퍼를 프로젝트 디렉터리에서 호출한다."""
+    module = Path(__file__).resolve()
+    adapter = module.parents[2] / "bin/kanban-adapter"
+    # wheel에는 래퍼가 없으며 HOME이나 다른 체크아웃으로 대체하지 않는다.
+    if (
+        module.parent.parent.name != "src"
+        or adapter.resolve() != adapter
+        or not adapter.is_file()
+        or not os.access(adapter, os.X_OK)
+    ):
+        raise RuntimeError(
+            f"repository-owned kanban-adapter unavailable: {adapter}; "
+            "install from the repository with scripts/setup.sh"
+        )
     fd_paths = [
         argument.split("=", 1)[-1]
         for argument in argv
@@ -76,7 +92,20 @@ def run_adapter(argv: list[str], cwd: Path) -> str:
         if argument in {"--title-file", "--result-file"}
         and argv[index + 1].startswith("/dev/fd/")
     )
-    pass_fds = tuple(sorted({int(path.rsplit("/", 1)[1]) for path in fd_paths}))
+    fd_paths.extend(
+        argument.rsplit("=", 1)[1]
+        for argument in argv
+        if argument.startswith("--conversation-receipt-fd=")
+    )
+    pass_fds = tuple(
+        sorted(
+            {
+                int(value.rsplit("/", 1)[-1])
+                for value in fd_paths
+                if value.rsplit("/", 1)[-1].isdigit()
+            }
+        )
+    )
     completed = subprocess.run(
         [str(adapter), *argv],
         cwd=cwd,
@@ -203,6 +232,12 @@ def _read_state(path: Path, *, directory_fd: int | None = None) -> tuple[dict[st
     transcript_path = payload.get("transcript_path")
     if isinstance(transcript_path, str) and Path(transcript_path).is_absolute():
         state["transcript_path"] = transcript_path
+    observation_receipt = payload.get("observation_receipt")
+    if isinstance(observation_receipt, dict) and len(json.dumps(observation_receipt)) <= 4096:
+        state["observation_receipt"] = observation_receipt
+    conversation_prepared = payload.get("conversation_prepared")
+    if isinstance(conversation_prepared, dict) and len(json.dumps(conversation_prepared)) <= 4096:
+        state["conversation_prepared"] = conversation_prepared
     baseline = clean_tokens(payload.get("token_baseline"))
     if baseline:
         state["token_baseline"] = baseline
@@ -374,6 +409,10 @@ def _handle_event_locked(
         existing = _read_state(state_path, directory_fd=directory_fd)
         if existing is not None:
             existing[1].close()
+            prepared = existing[0].get("conversation_prepared", {})
+            if (prepared.get("mode") == "claude-absent-v1"
+                    and prepared.get("prompt_id") == payload.get("prompt_id")):
+                return  # 프롬프트 재전달은 파일 부재 권한 근거를 EOF로 대체할 수 없다
             _complete(
                 state_path,
                 "Superseded by a new user prompt after a missing Stop event",
@@ -386,23 +425,39 @@ def _handle_event_locked(
             state_path.parent, title, label="title", directory_fd=directory_fd
         )
         validate_directory(cache, directory_fd)
+        receipt_read_fd: int | None = None
+        receipt_write_fd: int | None = None
+        command = [
+            "start",
+            "--title-file",
+            f"/dev/fd/{title_identity.file_fd}",
+            "--source", source,
+            "--idempotency-key",
+            _create_idempotency_key(source, session_id, cwd, prompt, payload.get("prompt_id")),
+        ]
+        if os.environ.get("UNIFIED_KANBAN_CONVERSATION_CONFIG"):
+            receipt_read_fd, receipt_write_fd = os.pipe()
+            command.append(f"--conversation-receipt-fd={receipt_write_fd}")
         try:
-            output = adapter(
-                [
-                    "start",
-                    "--title-file",
-                    f"/dev/fd/{title_identity.file_fd}",
-                    "--source", source,
-                    "--idempotency-key",
-                    _create_idempotency_key(source, session_id, cwd, prompt),
-                ],
-                cwd,
-            ).strip()
+            output = adapter(command, cwd).strip()
         finally:
             title_identity.close()
+            if receipt_write_fd is not None:
+                os.close(receipt_write_fd)
         if not _TASK_RE.fullmatch(output):
             raise RuntimeError("kanban-adapter returned an invalid task id")
         new_state: dict[str, Any] = {"cwd": str(cwd), "task_id": output}
+        if receipt_read_fd is not None:
+            try:
+                receipt_raw = os.read(receipt_read_fd, 4097)
+            finally:
+                os.close(receipt_read_fd)
+            if not receipt_raw or len(receipt_raw) > 4096:
+                raise RuntimeError("Hermes observation receipt was missing or oversized")
+            receipt = json.loads(receipt_raw)
+            if not isinstance(receipt, dict) or receipt.get("task") != output:
+                raise RuntimeError("Hermes observation receipt scope is invalid")
+            new_state["observation_receipt"] = receipt
         model = sanitize_model(payload.get("model"))
         if model:
             new_state["model"] = model
@@ -421,9 +476,47 @@ def _handle_event_locked(
                     f"token-baseline: {type(exc).__name__}",
                     kind="claude" if source == "claude-code" else source,
                 )
+                # 명시적으로 enable된 대화 수집의 private source candidate만
+                # token telemetry와 독립적으로 보존한다.
+                if os.environ.get("UNIFIED_KANBAN_CONVERSATION_CONFIG"):
+                    new_state["transcript_path"] = transcript_path
             else:
                 new_state["transcript_path"] = transcript_path
                 new_state["token_baseline"] = baseline
+        if (
+            isinstance(new_state.get("observation_receipt"), dict)
+            and isinstance(new_state.get("transcript_path"), str)
+        ):
+            from .conversation_runtime import capture_hook_start
+
+            receipt = new_state["observation_receipt"]
+            try:
+                prepared = capture_hook_start(
+                    board=str(receipt["board"]),
+                    task=output,
+                    provider="claude" if source == "claude-code" else source,
+                    session=session_id,
+                    source_path=Path(new_state["transcript_path"]),
+                    task_receipt=receipt,
+                )
+            except FileNotFoundError:
+                prepared = None
+                if source == "claude-code":
+                    from .claude_absent import capture
+                    from .conversation_runtime import get_conversation_service
+
+                    service = get_conversation_service()
+                    if service is not None:
+                        try:
+                            prepared = capture(
+                                service, board=str(receipt["board"]), task=output,
+                                session=session_id, source_path=Path(new_state["transcript_path"]),
+                                task_receipt=receipt, prompt_id=payload.get("prompt_id"),
+                            )
+                        except (OSError, ValueError, RuntimeError):
+                            log_error("conversation-start: limited source unavailable")
+            if prepared is not None:
+                new_state["conversation_prepared"] = prepared
         try:
             _write_state(state_path, new_state, directory_fd=directory_fd).close()
             validate_directory(cache, directory_fd)
@@ -499,8 +592,40 @@ def _handle_event_locked(
         else:
             state_identity.close()
 
-    if event == "stop":
+    if event in {"stop", "session-end"}:
         merge_model()
+        read = _read_state(state_path, directory_fd=directory_fd)
+        if read is not None:
+            state, state_identity = read
+            state_identity.close()
+            receipt = state.get("observation_receipt")
+            prepared = state.get("conversation_prepared")
+            if isinstance(receipt, dict) and isinstance(prepared, dict):
+                from .conversation_runtime import seal_hook_binding
+
+                if prepared.get("mode") == "claude-absent-v1":
+                    if isinstance(payload.get("prompt_id"), str) and payload["prompt_id"] != prepared.get("prompt_id"):
+                        return  # 늦게 도착한 이전 Stop은 현재 카드를 닫으면 안 된다
+                    from .claude_absent import seal
+                    from .conversation_runtime import get_conversation_service
+
+                    service = get_conversation_service()
+                    if service is not None:
+                        try:
+                            seal(service, board=str(receipt["board"]), task=state["task_id"],
+                                 prepared=prepared, task_receipt=receipt,
+                                 prompt_id=payload.get("prompt_id"))
+                        except (OSError, ValueError, RuntimeError):
+                            log_error("conversation-stop: limited source unavailable")
+                else:
+                    seal_hook_binding(
+                        board=str(receipt["board"]),
+                        task=state["task_id"],
+                        prepared=prepared,
+                        task_receipt=receipt,
+                    )
+
+    if event == "stop":
         result = payload.get("last_assistant_message")
         if not isinstance(result, str) or not result.strip():
             result = f"{label} response completed"
@@ -508,7 +633,6 @@ def _handle_event_locked(
         return
 
     if event == "session-end":
-        merge_model()
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             reason = "unknown"

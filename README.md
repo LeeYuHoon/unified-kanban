@@ -8,7 +8,7 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 
 - Hermes Agent: `0.21.1`
 - 공식 기반 commit: `f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140`
-- Unified Kanban release commit: `1514a4f98c88421a9595ac68fffb6226048baf44`
+- Unified Kanban release commit: `7b6c1856d60384116d2a3d496586989308bc463d`
 
 Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
 이 버전에는 Claude Fable 5.1 모델 목록 지원이 포함되어 있습니다.
@@ -116,6 +116,50 @@ hermes dashboard
 이제 실제 사용자 요청마다 카드가 생기고 작업이 끝나면 결과가 기록됩니다. 카드에는 최종 응답이 남으므로 비밀번호, API 키와 같은 민감정보를 요청이나 응답에 넣지 마세요.
 
 외부 CLI 작업은 **관찰 카드**로 기록됩니다. 조회·댓글·설명 편집과 기록의 완료·보관·삭제는 가능하지만, 대시보드에서 외부 작업을 재실행하거나 담당자·모델을 바꾸고 작업 상태를 이동·드래그할 수는 없습니다. 실제 작업은 원래 CLI에서 관리합니다.
+
+### 저장된 대화 보기
+
+대화 수집은 설치만으로 켜지지 않습니다. 활성화하면 그 뒤 새로 만들어진 관찰 카드부터 공개 사용자 요청, 최종 답변과 도구·스킬·MCP·보조 작업의 제한된 활동 정보가 카드에 연결됩니다. private analysis, thinking, 도구 인자·결과와 과거 기록은 가져오지 않습니다. 본문은 로컬에만 두고 best-effort로 민감정보를 가리지만, 완전한 제거를 보장하지는 않습니다.
+
+Claude의 첫 요청 전에 대화 파일이 아직 없으면, 실제 `prompt_id`와 검증된 파일 부재가 있는 새 카드에만 **LIMITED PARTIAL** 수집을 허용합니다. 파일이 처음 열릴 때까지 로컬 작성자를 신뢰하는 제한된 방식이며, 그 사이 동일 UID가 파일을 바꿔 놓는 공격을 막는다는 보장은 없습니다. Stop 뒤에도 파일 쓰기가 늦을 수 있어 Claude 대화는 항상 `partial`로 표시하며, 확인할 수 없는 내용은 가져오지 않습니다. [정확한 보안 범위와 지원 형식](docs/claude-absent-start-security.md)을 참고하세요.
+
+기본 보관 기간은 7일(설정 가능 1~30일), profile 전체 한도는 64 MiB입니다. 한도·권한·원본 identity를 확인할 수 없으면 저장이나 삭제를 성공으로 꾸미지 않고 중단합니다.
+
+이 기능은 Dashboard의 **interactive 인증**과 선택한 보드에 대한 명시적 사용자 권한이 필요합니다. `/api/health`가 `auth_required:false`인 운영 환경에서는 켜지 마세요. 먼저 사용할 인증 provider와 그 provider가 검증한 안정적인 user id의 권한 범위를 확인해야 합니다. access token, refresh token, cookie나 비밀번호를 principal로 넣으면 안 됩니다.
+
+권한을 확인한 뒤 owner가 다음처럼 선택한 보드에서만 활성화합니다. 이 명령은 앞으로의 Hermes 관찰 기록을 시작하고 owner 전용 로컬 key를 준비합니다. Claude Code와 Codex 원본 투영은 별도의 private runtime 설정까지 검토된 경우에만 동작하며, 설정이 없으면 닫힌 상태로 비활성화됩니다.
+
+```bash
+hermes kanban --board BOARD conversation-config --enable \
+  --principal PROVIDER:STABLE_USER_ID \
+  --retention-days 7 \
+  --max-bytes 67108864
+```
+
+외부 Claude/Codex용 설정 파일만 준비하려면 저장소의 Python 환경에서 아래 명령을 실행합니다. `STATE_ROOT`는 아직 없는 절대 경로이고 부모는 현재 사용자 소유 `0700`이어야 합니다. `KERNEL_KEY`는 이미 존재하는 native key의 절대 경로입니다. native가 선택한 `HERMES_KANBAN_CONVERSATION_KERNEL_SECRET_FILE`, 또는 `HERMES_HOME/conversation-journal/kernel-receipt.key`와 정확히 일치해야 하며 새 native key는 만들지 않습니다.
+
+```bash
+PYTHONPATH=src python -m kanban_adapter.conversation_owner_cli init \
+  --state-root /ABS/STATE_ROOT --kernel-secret-file /ABS/KERNEL_KEY \
+  --board BOARD --principal PROVIDER:STABLE_USER_ID \
+  --provider-root claude=/ABS/CLAUDE_ROOT \
+  --expires-at-ns FUTURE_UNIX_NANOSECONDS
+```
+
+필요하면 `--provider-root codex=/ABS/CODEX_ROOT`와 검증된 `--principal`을 반복합니다. 보드는 소문자 slug 하나만, 원본 provider는 `claude`·`codex`만 허용합니다. provider root와 key 부모도 현재 사용자 소유 `0700`, key는 `0600` 일반 파일·단일 링크여야 합니다. provider root는 projector와 동일한 no-follow 검사로 시스템 별칭도 거절합니다. macOS에서는 `/var` 대신 `/private/var` 같은 정식 경로를 직접 지정해야 하며 입력을 자동 변환하지 않습니다. 사용자 심볼릭 링크 경로와 기존 state는 거절합니다. 실패한 준비 폴더는 자동 삭제하거나 덮어쓰지 않습니다.
+
+새 authority key·서명 정책을 먼저 기록하고 `runtime.json`을 마지막에 준비합니다. 파일 안의 `enabled:true`는 준비 상태일 뿐 **환경 변수나 launchd 설정은 변경하지 않습니다**. 별도 검토 후 `UNIFIED_KANBAN_CONVERSATION_CONFIG`를 연결하기 전에는 외부 수집이 켜지지 않으며 Hermes 수집도 이 명령으로 켜지지 않습니다. 테스트는 임시 key와 합성 hook 기록의 투영 검증이며 실제 provider 추론·운영 활성화 검증이 아닙니다. 저장장치 장애나 동일 사용자에 의한 동시 변조까지 원자적 삭제로 복구한다고 보장하지 않습니다. 마지막 publication 실패 뒤 무효화도 실패하면 원래 오류와 cleanup 진단을 함께 출력하며 설정이 사용 가능한 상태로 남을 수 있습니다.
+
+선택적 native 회귀 검증은 `UNIFIED_KANBAN_TEST_HERMES_SOURCE=/ABS/REVIEWED_HERMES_SOURCE .venv/bin/python -m pytest tests/test_conversation_owner_cli.py -k real_native -s`로 실행합니다. 실제 source API의 issue_observation_receipt → pipe → capture/seal → projection 경로를 임시 HOME·무작위 key·허용 목록 환경에서 검증합니다. membership과 provider transcript는 합성이며 실제 카드 생성·provider 추론 E2E가 아닙니다. source 및 운영 설정·데이터는 변경하지 않습니다.
+
+즉시 새 수집을 멈추려면 다음을 실행합니다. 이미 저장된 owner 확인 기록은 자동 만료 또는 명시 삭제 전까지 남습니다.
+
+```bash
+hermes kanban --board BOARD conversation-config --disable
+hermes kanban --board BOARD conversation-delete TASK_ID --json
+```
+
+Dashboard 카드의 **저장된 대화 삭제**도 같은 인증·보드·task 범위를 다시 확인합니다. 결과가 `verified:false`이면 삭제 완료가 아닙니다. identity 없는 보조 작업은 연결을 추측하지 않고 `partial`로 표시합니다.
 
 설치 상태를 다시 확인하려면 다음 명령을 실행하세요.
 

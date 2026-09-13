@@ -14,6 +14,7 @@ from pathlib import Path
 
 Runner = Callable[[list[str]], str]
 _FD_FILE_RE = re.compile(r"--(?:title|result)-file=/dev/fd/([0-9]+)\Z")
+_RECEIPT_FD_RE = re.compile(r"--conversation-receipt-fd=([0-9]+)\Z")
 
 
 class BoardNotMappedError(RuntimeError):
@@ -25,7 +26,7 @@ def run_command(argv: list[str]) -> str:
     pass_fds = tuple(sorted({
         int(match.group(1))
         for argument in argv
-        if (match := _FD_FILE_RE.fullmatch(argument)) is not None
+        if (match := (_FD_FILE_RE.fullmatch(argument) or _RECEIPT_FD_RE.fullmatch(argument))) is not None
     }))
     completed = subprocess.run(
         argv,
@@ -114,6 +115,7 @@ class HermesCliBackend:
         title: str | None = None,
         title_file: Path | None = None,
         idempotency_key: str | None = None,
+        receipt_fd: int | None = None,
     ) -> str:
         """running 상태의 observation 카드를 생성하고 검증된 task id를 반환한다."""
         if source not in _SOURCE:
@@ -144,6 +146,10 @@ class HermesCliBackend:
             if not _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
                 raise ValueError("invalid idempotency key")
             argv.append(f"--idempotency-key={idempotency_key}")
+        if receipt_fd is not None:
+            if receipt_fd < 3:
+                raise ValueError("conversation receipt FD must not alias stdio")
+            argv.append(f"--conversation-receipt-fd={receipt_fd}")
         if assignee:
             argv.extend(["--assignee", assignee])
         argv.extend([

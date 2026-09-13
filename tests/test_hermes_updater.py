@@ -269,6 +269,16 @@ def _python_shim(real_python: str) -> str:
     )
 
 
+def test_fixture_npm_is_preflight_only(tmp_path: Path) -> None:
+    env = environment(tmp_path)
+    npm = Path(env["PATH"].split(os.pathsep)[0]) / "npm"
+    assert npm.is_file(), "fixture must supply npm without relying on host PATH"
+    result = subprocess.run([str(npm), "--version"], env=env, text=True,
+                            capture_output=True, timeout=5, check=False)
+    assert result.returncode == 97
+    assert "unexpected npm execution" in result.stderr
+
+
 def environment(tmp_path: Path, *, install_launcher: bool = True) -> dict[str, str]:
     fixture_root = tmp_path / "unified-kanban"
     for name in ("scripts", "patches", "src", "integrations"):
@@ -297,6 +307,13 @@ def environment(tmp_path: Path, *, install_launcher: bool = True) -> dict[str, s
         encoding="utf-8",
     )
     gateway_python.chmod(0o755)
+    # 릴리스 빌드는 모의 처리하며 npm은 실행 파일 사전 검사만 충족한다.
+    npm = fake_bin / "npm"
+    npm.write_text(
+        '#!/bin/sh\necho "unexpected npm execution: unit fixture replaces release build" >&2\nexit 97\n',
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
     for name, body in (
         ("git", FAKE_GIT),
         ("curl", FAKE_CURL),

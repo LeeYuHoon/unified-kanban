@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     title_source.add_argument("--title-file", type=Path)
     start.add_argument("--source", required=True, choices=("claude-code", "codex", "manual"))
     start.add_argument("--idempotency-key", dest="idempotency_key")
+    start.add_argument("--conversation-receipt-fd", type=int, dest="receipt_fd")
 
     update = sub.add_parser("update")
     update.add_argument("--board")
@@ -109,6 +110,8 @@ def main(
             options = {"board": board, "source": args.source}
             if args.idempotency_key is not None:
                 options["idempotency_key"] = args.idempotency_key
+            if args.receipt_fd is not None:
+                options["receipt_fd"] = args.receipt_fd
             if args.title is not None:
                 options["title"] = args.title
             else:

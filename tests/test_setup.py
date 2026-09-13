@@ -105,6 +105,8 @@ def install_fake_hermes(
         f"  'kanban block --help') printf '%s\\n' '{options('--kind')}';;\n"
         "  'kanban show --help') echo 'task_id';;\n"
         "  'kanban archive --help') echo 'task_ids';;\n"
+        f"  'kanban conversation-config --help') printf '%s\\n' "
+        f"'{options('--enable --disable --principal --retention-days --max-bytes')}';;\n"
     )
     script.write_text(
         "#!/usr/bin/env bash\n"
@@ -286,6 +288,13 @@ def fake_env(
         missing_option=missing_option,
         option_replacements=option_replacements,
     )
+    # 릴리스 빌드는 모의 처리하며 npm은 실행 파일 사전 검사만 충족한다.
+    npm = fake_bin / "npm"
+    npm.write_text(
+        '#!/bin/sh\necho "unexpected npm execution: unit fixture replaces release build" >&2\nexit 97\n',
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
     agent_repo = tmp_path / "fake-hermes-agent"
     agent_repo.mkdir(exist_ok=True)
     carried = fixture_root / "patches/hermes-agent-carried-commits"
@@ -384,6 +393,16 @@ def fake_env(
         "_TEST_SETUP": str(fixture_root / "scripts/setup.sh"),
         "_TEST_ROOT": str(fixture_root),
     }, log
+
+
+def test_fixture_npm_is_preflight_only(tmp_path: Path) -> None:
+    env = fake_env(tmp_path)[0]
+    npm = Path(env["PATH"].split(os.pathsep)[0]) / "npm"
+    assert npm.is_file(), "fixture must supply npm without relying on host PATH"
+    result = subprocess.run([str(npm), "--version"], env=env, text=True,
+                            capture_output=True, timeout=5, check=False)
+    assert result.returncode == 97
+    assert "unexpected npm execution" in result.stderr
 
 
 def test_setup_dry_run_does_not_write(tmp_path: Path) -> None:
