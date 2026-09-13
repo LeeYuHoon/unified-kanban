@@ -44,6 +44,17 @@ def _verify_pinned_updater_argv(source: str) -> None:
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.name != "_git_run":
             continue
+        # e16f686706b1e0d5334fd1ae82190058d2a19694는 네트워크 대기 시간만 제한하며
+        # argv는 바꾸지 않는다. 유일한 TimeoutExpired 처리기를 포함하여 검토한
+        # 실행기 소스 전체만 허용한다. 임의의 try/except 본문을 재귀 탐색하여
+        # 겉보기에 안전한 return 하나만으로 허용하지 않는다.
+        # 소스 해시를 사용하면 Python 버전별 AST 필드 차이를 피할 수 있다.
+        runner_digest = hashlib.sha256(
+            (ast.get_source_segment(source, node) or "").encode("utf-8")
+        ).hexdigest()
+        if (runner_digest == "ae381f7f93b0cdf58454c39c3c0ca8bf15466d3ac30cab762f95d383ea8d971f"
+                and all(fragment in source for fragment in split_calls)):
+            return
         for statement in node.body:
             call = statement.value if isinstance(statement, ast.Return) else None
             if (isinstance(call, ast.Call) and ast.unparse(call.func) == "subprocess.run"

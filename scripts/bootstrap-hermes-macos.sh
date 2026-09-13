@@ -276,10 +276,10 @@ copy_stable() {
   [[ "$before" == "$after" ]] || fail "$label changed during validation"
 }
 
-MANIFEST_SHA256="9483734b06650e37f6d630ac90af4d96020687a4897c4545eabdca8070a16518"
-UPSTREAM_FILE_SHA256="bb51cad01dfaab86abc3b4520e2d8387b3539ad06eaec44c4e80ae545b73e4d2"
-UPSTREAM="f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140"
-INSTALLER_SHA256="5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968"
+MANIFEST_SHA256="e2a343742dfe9635d4c510413f4cbabc29497919f0b7dc882669d21b260573a6"
+UPSTREAM_FILE_SHA256="db19f69b0078ac8a2462fb18363687764043ef0eff6878a11913fc80122c8b9d"
+UPSTREAM="e16f686706b1e0d5334fd1ae82190058d2a19694"
+INSTALLER_SHA256="38547c22f4dd2224ba68a13bc3479309abb17e295b2a2ef79c2d1b8293bd822e"
 INSTALLER_URL="https://raw.githubusercontent.com/NousResearch/hermes-agent/$UPSTREAM/scripts/install.sh"
 require_digest "$MANIFEST" "bootstrap manifest" "$MANIFEST_SHA256"
 require_digest "$UPSTREAM_FILE" "supported upstream pin" "$UPSTREAM_FILE_SHA256"

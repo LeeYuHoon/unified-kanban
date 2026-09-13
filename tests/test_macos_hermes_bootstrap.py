@@ -12,6 +12,23 @@ REPO = Path(__file__).resolve().parents[1]
 BOOTSTRAP = REPO / "scripts/bootstrap-hermes-macos.sh"
 
 
+def test_bootstrap_reviewed_policy_matches_exact_repository_bytes() -> None:
+    import hashlib
+    import re
+
+    # 고정 정책은 파싱한 값이 아니라 개행을 포함한 전체 파일 바이트에 결합한다.
+    source = BOOTSTRAP.read_text(encoding="utf-8")
+    pins = dict(re.findall(r'^([A-Z_0-9]+)="([^"\n]+)"$', source, re.MULTILINE))
+    for key, name in (
+        ("MANIFEST_SHA256", "hermes-agent-bootstrap-manifest"),
+        ("UPSTREAM_FILE_SHA256", "hermes-agent-supported-upstream"),
+    ):
+        assert pins[key] == hashlib.sha256((REPO / "patches" / name).read_bytes()).hexdigest()
+    manifest = dict(line.split("=", 1) for line in (REPO / "patches/hermes-agent-bootstrap-manifest").read_text().splitlines())
+    assert pins["UPSTREAM"] == manifest["upstream"]
+    assert pins["INSTALLER_SHA256"] == manifest["installer_sha256"]
+
+
 def rendered_bootstrap(tmp_path: Path, replacements: dict[str, str]) -> Path:
     fixture_root = tmp_path / "repo"
     (fixture_root / "scripts").mkdir(parents=True)
@@ -52,8 +69,8 @@ def rendered_bootstrap(tmp_path: Path, replacements: dict[str, str]) -> Path:
 def installer_artifact_commands() -> str:
     return (
         'mkdir -p "$HERMES_AGENT_REPO/.git" "$HERMES_AGENT_REPO/venv/bin" "$HERMES_AGENT_REPO/.hermes-runtime/python/generation-test/cpython-3.11-macos-aarch64-none/bin" "$HERMES_HOME/bin" "$HERMES_HOME/node/bin" "$HOME/.local/bin"\n'
-        'printf "%s\\n" "f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140" >"$HERMES_AGENT_REPO/.git/HEAD"\n'
-        "printf '{\\n  \"schemaVersion\": 1,\\n  \"pinnedCommit\": \"f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140\",\\n  \"pinnedBranch\": \"main\",\\n  \"completedAt\": \"2026-08-30T00:00:00.000Z\"\\n}\\n' >\"$HERMES_AGENT_REPO/.hermes-bootstrap-complete\"\n"
+        'printf "%s\\n" "e16f686706b1e0d5334fd1ae82190058d2a19694" >"$HERMES_AGENT_REPO/.git/HEAD"\n'
+        "printf '{\\n  \"schemaVersion\": 1,\\n  \"pinnedCommit\": \"e16f686706b1e0d5334fd1ae82190058d2a19694\",\\n  \"pinnedBranch\": \"main\",\\n  \"completedAt\": \"2026-08-30T00:00:00.000Z\"\\n}\\n' >\"$HERMES_AGENT_REPO/.hermes-bootstrap-complete\"\n"
         'printf "git\\n" >"$HERMES_AGENT_REPO/.install_method"\n'
         'printf "#!/bin/sh\\nexit 0\\n" >"$HERMES_AGENT_REPO/hermes"\n'
         "cat >\"$HERMES_AGENT_REPO/.hermes-runtime/python/generation-test/cpython-3.11-macos-aarch64-none/bin/python3.11\" <<'PYTHON_EOF'\n"
@@ -112,7 +129,7 @@ def run_fresh_bootstrap_fixture(
         "trap '/bin/rm -f \"$tmp\"' EXIT HUP INT TERM\n"
         "/bin/cat >\"$tmp\"\n"
         "if /usr/bin/grep -q 'HERMES_AGENT_REPO/.hermes-bootstrap-complete' \"$tmp\"; then\n"
-        "  printf '%s  -\\n' 5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968\n"
+        "  printf '%s  -\\n' 38547c22f4dd2224ba68a13bc3479309abb17e295b2a2ef79c2d1b8293bd822e\n"
         "else /usr/bin/shasum -a 256 \"$tmp\"; fi\n",
         encoding="utf-8",
     )
@@ -146,9 +163,9 @@ def run_fresh_bootstrap_fixture(
 
 def create_bootstrap_artifacts(home: Path, agent_repo: Path, hermes_home: Path) -> None:
     (agent_repo / ".git").mkdir(parents=True, exist_ok=True)
-    (agent_repo / ".git/HEAD").write_text("f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140\n", encoding="utf-8")
+    (agent_repo / ".git/HEAD").write_text("e16f686706b1e0d5334fd1ae82190058d2a19694\n", encoding="utf-8")
     (agent_repo / ".hermes-bootstrap-complete").write_text(
-        '{\n  "schemaVersion": 1,\n  "pinnedCommit": "f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140",\n  "pinnedBranch": "main",\n  "completedAt": "2026-08-30T00:00:00.000Z"\n}\n', encoding="utf-8"
+        '{\n  "schemaVersion": 1,\n  "pinnedCommit": "e16f686706b1e0d5334fd1ae82190058d2a19694",\n  "pinnedBranch": "main",\n  "completedAt": "2026-08-30T00:00:00.000Z"\n}\n', encoding="utf-8"
     )
     (agent_repo / ".install_method").write_text("git\n", encoding="utf-8")
     for executable in (agent_repo / "hermes", hermes_home / "bin/uv"):
@@ -435,7 +452,7 @@ def test_bootstrap_uses_exact_pinned_installer_argv_and_scrubbed_environment(
         "trap '/bin/rm -f \"$tmp\"' EXIT HUP INT TERM\n"
         "/bin/cat >\"$tmp\"\n"
         "if /usr/bin/grep -q 'HERMES_AGENT_REPO/.hermes-bootstrap-complete' \"$tmp\"; then\n"
-        "  printf '%s  -\\n' 5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968\n"
+        "  printf '%s  -\\n' 38547c22f4dd2224ba68a13bc3479309abb17e295b2a2ef79c2d1b8293bd822e\n"
         "else /usr/bin/shasum -a 256 \"$tmp\"; fi\n",
         encoding="utf-8",
     )
@@ -480,7 +497,7 @@ def test_bootstrap_uses_exact_pinned_installer_argv_and_scrubbed_environment(
     assert list(hostile_tmpdir.iterdir()) == []
     assert (home / "installer-argv").read_text(encoding="utf-8").splitlines() == [
         "--commit",
-        "f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140",
+        "e16f686706b1e0d5334fd1ae82190058d2a19694",
         "--dir",
         str(agent_repo),
         "--hermes-home",
@@ -594,7 +611,7 @@ def test_bootstrap_default_receipt_matches_setup_state_authority(
         "trap '/bin/rm -f \"$tmp\"' EXIT HUP INT TERM\n"
         "/bin/cat >\"$tmp\"\n"
         "if /usr/bin/grep -q 'HERMES_AGENT_REPO/.hermes-bootstrap-complete' \"$tmp\"; then\n"
-        "  printf '%s  -\\n' 5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968\n"
+        "  printf '%s  -\\n' 38547c22f4dd2224ba68a13bc3479309abb17e295b2a2ef79c2d1b8293bd822e\n"
         "else /usr/bin/shasum -a 256 \"$tmp\"; fi\n",
         encoding="utf-8",
     )
@@ -734,7 +751,7 @@ def test_bootstrap_status_refuses_hardlinked_receipt(tmp_path: Path) -> None:
     receipt = state_dir / "hermes-bootstrap.receipt"
     receipt.write_text(
         "format=unified-kanban-hermes-bootstrap-receipt-v1\n"
-        "upstream=f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140\n"
+        "upstream=e16f686706b1e0d5334fd1ae82190058d2a19694\n"
         f"agent_repo={agent_repo}\n"
         f"hermes_home={hermes_home}\n"
         "status=bootstrap-complete\n"
@@ -771,7 +788,7 @@ def test_bootstrap_status_refuses_hardlinked_receipt(tmp_path: Path) -> None:
 def bootstrap_receipt_bytes(agent_repo: Path, hermes_home: Path) -> bytes:
     return (
         "format=unified-kanban-hermes-bootstrap-receipt-v1\n"
-        "upstream=f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140\n"
+        "upstream=e16f686706b1e0d5334fd1ae82190058d2a19694\n"
         f"agent_repo={agent_repo}\n"
         f"hermes_home={hermes_home}\n"
         "status=bootstrap-complete\n"
@@ -1344,7 +1361,7 @@ def test_bootstrap_preserves_receipt_successor_created_by_installer(tmp_path: Pa
         "trap '/bin/rm -f \"$tmp\"' EXIT HUP INT TERM\n"
         "/bin/cat >\"$tmp\"\n"
         "if /usr/bin/grep -q 'HERMES_AGENT_REPO/.hermes-bootstrap-complete' \"$tmp\"; then\n"
-        "  printf '%s  -\\n' 5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968\n"
+        "  printf '%s  -\\n' 38547c22f4dd2224ba68a13bc3479309abb17e295b2a2ef79c2d1b8293bd822e\n"
         "else /usr/bin/shasum -a 256 \"$tmp\"; fi\n",
         encoding="utf-8",
     )
@@ -1406,5 +1423,5 @@ def test_setup_delegates_bootstrap_identity_to_status_helper() -> None:
     setup = (REPO / "scripts/setup.sh").read_text(encoding="utf-8")
 
     assert "unified-kanban-hermes-bootstrap-receipt-v1" not in setup
-    assert "5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968" not in setup
+    assert "38547c22f4dd2224ba68a13bc3479309abb17e295b2a2ef79c2d1b8293bd822e" not in setup
     assert '"$BOOTSTRAP_HELPER" --status' in setup
