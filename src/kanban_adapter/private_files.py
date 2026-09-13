@@ -479,8 +479,13 @@ def atomic_publish(
     owned_expected: Receipt | None = None
     committed = False
     try:
-        fd = os.open(staged_name, flags, 0o600, dir_fd=parent)
-        staged = Receipt(os.dup(parent), fd, staged_name)
+        receipt_parent = os.dup(parent)
+        try:
+            fd = os.open(staged_name, flags, 0o600, dir_fd=parent)
+        except BaseException:
+            os.close(receipt_parent)
+            raise
+        staged = Receipt(receipt_parent, fd, staged_name)
         os.fchmod(fd, 0o600)
         _write_all(fd, content)
         os.fsync(fd)
@@ -494,7 +499,12 @@ def atomic_publish(
             expected = expected_identity
             if not isinstance(expected, Receipt):
                 old_fd = os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
-                expected = Receipt(os.dup(parent), old_fd, path.name)
+                try:
+                    expected_parent = os.dup(parent)
+                except BaseException:
+                    os.close(old_fd)
+                    raise
+                expected = Receipt(expected_parent, old_fd, path.name)
                 owned_expected = expected
                 if expected.identity != expected_identity:
                     expected.close()

@@ -368,3 +368,39 @@ def test_restore_detached_fsync_failure_redetaches_after_parent_replacement(
     assert not (cache / "state.json").exists()
     assert not (retained / "state.json").exists()
     assert (retained / detached_name).read_bytes() == b"state"
+
+
+def test_atomic_publish_dup_failure_has_no_fd_leak(tmp_path, monkeypatch):
+    from kanban_adapter import private_files as private
+    before = set(os.listdir("/dev/fd"))
+    def fail(fd):
+        raise OSError("injected receipt dup")
+    with monkeypatch.context() as patch:
+        patch.setattr(private.os, "dup", fail)
+        with pytest.raises(OSError, match="injected receipt dup"):
+            private.atomic_publish(tmp_path / "new", b"private")
+    assert set(os.listdir("/dev/fd")) == before
+    assert not list(tmp_path.iterdir())
+
+
+def test_atomic_publish_existing_leaf_dup_failure_closes_fd(tmp_path, monkeypatch):
+    from kanban_adapter import private_files as private
+    path = tmp_path / "existing"
+    with private.atomic_publish(path, b"original") as receipt:
+        identity = receipt.identity
+    before = set(os.listdir("/dev/fd"))
+    original_dup = os.dup
+    calls = 0
+    def fail(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected existing receipt dup")
+        return original_dup(fd)
+    with monkeypatch.context() as patch:
+        patch.setattr(private.os, "dup", fail)
+        with pytest.raises(OSError, match="injected existing receipt dup"):
+            private.atomic_publish(path, b"replacement", expected_identity=identity)
+    assert set(os.listdir("/dev/fd")) == before
+    assert path.read_bytes() == b"original"
+    assert list(tmp_path.iterdir()) == [path]

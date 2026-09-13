@@ -19,10 +19,10 @@ DIRECTIVE_RE = re.compile(
 )
 
 
-def tracked_files() -> list[Path]:
-    """Git이 관리하는 파일만 검사 대상으로 돌려준다."""
+def tracked_files(*, include_untracked: bool = False) -> list[Path]:
+    """Git 관리 파일을 반환하며 요청 시 무시되지 않은 미추적 파일도 포함한다."""
     output = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", *(["--cached", "--others", "--exclude-standard"] if include_untracked else [])],
         cwd=REPO,
         check=True,
         capture_output=True,
@@ -102,7 +102,7 @@ def test_readme_hermes_release_matches_manifests() -> None:
 
 def test_python_comments_and_docstrings_include_korean() -> None:
     failures: list[str] = []
-    for path in tracked_files():
+    for path in tracked_files(include_untracked=True):
         if path.suffix != ".py":
             continue
         source = path.read_text(encoding="utf-8")

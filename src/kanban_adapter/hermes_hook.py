@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -216,12 +217,19 @@ class TurnTracker:
                 existing[1].close()
                 return
             board = self.backend.resolve_board(cwd=self.cwd_provider())
+            collect_conversation = False
+            try:
+                journal_module = importlib.import_module("hermes_cli.conversation_journal")
+                collect_conversation = journal_module.collection_requested(board)
+            except (ImportError, OSError, PermissionError, RuntimeError, ValueError):
+                collect_conversation = False
             title_identity = create_anonymous_text(
                 self.cache_root, title, label="title", directory_fd=directory_fd
             )
             validate_directory(self.cache_root, directory_fd)
+            receipt_read = receipt_write = None
             try:
-                raw = self.runner([
+                command = [
                     "hermes", "kanban", "--board", board, "create",
                     "--observation",
                     "--tenant", "hermes",
@@ -234,9 +242,21 @@ class TurnTracker:
                     ).hexdigest(),
                     "--json",
                     f"--title-file=/dev/fd/{title_identity.file_fd}",
-                ])
+                ]
+                if collect_conversation:
+                    receipt_read, receipt_write = os.pipe()
+                    command.append(f"--conversation-receipt-fd={receipt_write}")
+                try:
+                    raw = self.runner(command)
+                except BaseException:
+                    if receipt_read is not None:
+                        os.close(receipt_read)
+                        receipt_read = None
+                    raise
             finally:
                 title_identity.close()
+                if receipt_write is not None:
+                    os.close(receipt_write)
             result = json.loads(raw)
             task_id = result.get("id") if isinstance(result, dict) else None
             if not isinstance(task_id, str) or not _TASK_RE.fullmatch(task_id):
@@ -258,6 +278,28 @@ class TurnTracker:
             # 살아 있는 다른 턴을 종료시킬 수 있다. running 상태로 남겨 둔다.
             # 정상 소유자가 완료하거나, 고아(orphan) 만료가 닫을 것이다.
             state: dict[str, Any] = {"board": board, "task_id": task_id}
+            if receipt_read is not None:
+                try:
+                    receipt_wire = os.read(receipt_read, 16_385)
+                    if not receipt_wire or len(receipt_wire) > 16_384:
+                        raise PermissionError("observation receipt size is invalid")
+                    observation_receipt = json.loads(receipt_wire)
+                    journal_module = importlib.import_module("hermes_cli.conversation_journal")
+                    journal_receipt = journal_module.ConversationJournal().begin_turn(
+                        board=board,
+                        task_id=task_id,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        observation_receipt=observation_receipt,
+                        model=sanitize_model(model),
+                        platform=platform,
+                    )
+                    state["conversation_receipt"] = journal_receipt.to_state()
+                except (OSError, PermissionError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning("Hermes observation conversation start was not stored: %s", type(exc).__name__)
+                finally:
+                    os.close(receipt_read)
             resolved_model = sanitize_model(model)
             if resolved_model:
                 state["model"] = resolved_model
@@ -359,6 +401,8 @@ class TurnTracker:
         turn_id: str,
         assistant_response: Any = None,
         model: Any = None,
+        response_channel: Any = None,
+        final_authority: Any = None,
         **_ignored: Any,
     ) -> None:
         """완전한 최종 응답과, 크기가 제한된 카드용 요약을 함께 저장한다."""
@@ -372,6 +416,22 @@ class TurnTracker:
 
         def apply(state: dict[str, Any]) -> bool:
             changed = False
+            raw_receipt = state.get("conversation_receipt")
+            if raw_receipt is not None and (
+                response_channel != "final" or final_authority != "agent.turn_finalizer"
+            ):
+                return False
+            if raw_receipt is not None and state.get("conversation_sealed") is not True:
+                try:
+                    journal_module = importlib.import_module("hermes_cli.conversation_journal")
+                    journal_module.ConversationJournal().seal_turn(
+                        journal_module.TurnReceipt.from_state(raw_receipt),
+                        assistant_response=assistant_response,
+                    )
+                    state["conversation_sealed"] = True
+                    changed = True
+                except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning("Hermes observation conversation final was not stored: %s", type(exc).__name__)
             if resolved_model and state.get("model") != resolved_model:
                 state["model"] = resolved_model
                 changed = True

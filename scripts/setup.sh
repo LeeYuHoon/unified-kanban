@@ -184,7 +184,7 @@ raise SystemExit(0 if expected in tokens else 1)
 }
 validate_kanban_cli_contract() {
   local kanban_help create_help boards_list_help boards_create_help
-  local comment_help complete_help block_help show_help archive_help
+  local comment_help complete_help block_help show_help archive_help conversation_config_help
   kanban_help="$(hermes kanban --help)"
   create_help="$(hermes kanban create --help)"
   boards_list_help="$(hermes kanban boards list --help)"
@@ -194,6 +194,7 @@ validate_kanban_cli_contract() {
   block_help="$(hermes kanban block --help)"
   show_help="$(hermes kanban show --help)"
   archive_help="$(hermes kanban archive --help)"
+  conversation_config_help="$(hermes kanban conversation-config --help)"
   has_help_token "$kanban_help" "--board" \
     && has_help_token "$create_help" "--assignee" \
     && has_help_token "$create_help" "--tenant" \
@@ -210,7 +211,12 @@ validate_kanban_cli_contract() {
     && has_help_token "$complete_help" "--summary" \
     && has_help_token "$block_help" "--kind" \
     && has_help_token "$show_help" "task_id" \
-    && has_help_token "$archive_help" "task_ids" || {
+    && has_help_token "$archive_help" "task_ids" \
+    && has_help_token "$conversation_config_help" "--enable" \
+    && has_help_token "$conversation_config_help" "--disable" \
+    && has_help_token "$conversation_config_help" "--principal" \
+    && has_help_token "$conversation_config_help" "--retention-days" \
+    && has_help_token "$conversation_config_help" "--max-bytes" || {
     echo "Installed Hermes Kanban CLI is incompatible with unified-kanban" >&2
     exit 1
   }
@@ -801,6 +807,8 @@ The adapter will automatically select that board anywhere inside the project dir
 Claude Code and Codex hooks are installed. Restart each CLI before testing a new prompt.
 The Hermes Agent plugin (hermes-kanban) records every Hermes turn on the same boards.
 The ai-session-viewer command provides a read-only Claude, Codex, and Hermes session timeline.
+Stored conversation collection remains disabled. Do not enable it until Dashboard interactive
+authentication and the exact provider:user-id board grant have been reviewed.
 EOF
 if ((SKIP_SMOKE == 0 && HERMES_BOOTSTRAP_MANAGED)); then
   echo "Hermes runtime is installed; provider configuration or smoke board may be absent, so authenticated smoke deferred."
