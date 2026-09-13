@@ -117,6 +117,31 @@ def test_pinned_updater_argv_contract_accepts_split_runner() -> None:
     )
 
 
+def test_pinned_updater_argv_contract_accepts_frozen_timeout_runner() -> None:
+    source = (Path(__file__).parent / "fixtures/pinned_updater_timeout_runner.txt").read_text()
+    source += '\n_git_run(git_cmd, ["rev-list", f"HEAD..origin/{branch}", "--count"], check=True)\n'
+    source += '_git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])\n'
+    _load_verifier()._verify_pinned_updater_argv(source)
+
+
+@pytest.mark.parametrize("old,new", [
+    ("git_cmd + args", "args + git_cmd"),
+    ("git_cmd + args", "git_cmd + args + ['--unsafe']"),
+    ("except subprocess.TimeoutExpired", "except Exception"),
+    ("return result", "return subprocess.run(args)"),
+    ('["merge", "--ff-only",', '["merge", "--force",'),
+    ('["rev-list", f"HEAD..origin/{branch}", "--count"]',
+     '["rev-list", "--count", f"HEAD..origin/{branch}"]'),
+])
+def test_pinned_timeout_runner_rejects_unreviewed_shapes(old: str, new: str) -> None:
+    source = (Path(__file__).parent / "fixtures/pinned_updater_timeout_runner.txt").read_text()
+    source += '\n_git_run(git_cmd, ["rev-list", f"HEAD..origin/{branch}", "--count"], check=True)\n'
+    source += '_git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])\n'
+    assert old in source
+    with pytest.raises(SystemExit, match="argv contract has drifted"):
+        _load_verifier()._verify_pinned_updater_argv(source.replace(old, new))
+
+
 def test_pinned_updater_argv_contract_rejects_reversed_runner_prefix() -> None:
     verifier = _load_verifier()
     with pytest.raises(SystemExit, match="argv contract has drifted"):
