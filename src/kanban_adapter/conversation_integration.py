@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from .conversation_transaction import collection_operation as collection_operation_entry, policy_lease, policy_writer
+
 import hashlib
 import hmac
 import json
@@ -137,9 +140,16 @@ class OwnerPolicyFile:
             raise ValueError("policy path must be absolute")
 
     @staticmethod
+    def _mac(secret: bytes, payload: dict[str, object]) -> str:
+        # 구형 reader가 새 맵을 무시해도 인증에 실패하도록 MAC 입력도 분리한다.
+        if payload.get("schema_version") == 2:
+            return _tag("po2", secret, ["collection-policy-v2", payload])
+        return _tag("po", secret, payload)
+
+    @staticmethod
     def _payload(policy: CollectionPolicyV1) -> dict[str, object]:
-        return {
-            "schema_version": 1,
+        payload = {
+            "schema_version": policy.schema_version,
             "version": policy.version,
             "generation": policy.generation,
             "activated_at_ns": policy.activated_at_ns,
@@ -147,6 +157,12 @@ class OwnerPolicyFile:
             "minimum_binding_version": policy.minimum_binding_version,
             "enabled_boards": {key: sorted(value) for key, value in policy.enabled_boards.items()},
         }
+        if policy.schema_version == 2:
+            assert policy.pair_activated_at_ns is not None
+            payload["pair_activated_at_ns"] = {
+                board: dict(values) for board, values in policy.pair_activated_at_ns.items()
+            }
+        return payload
 
     def load(self) -> CollectionPolicyV1:
         try:
@@ -154,25 +170,59 @@ class OwnerPolicyFile:
         except FileNotFoundError:
             return CollectionPolicyV1.disabled(version=1, generation=1)
         try:
-            envelope = json.loads(raw)
-            if not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
-                raise ValueError("policy envelope is invalid")
-            payload = envelope["payload"]
-            if not isinstance(payload, dict) or not hmac.compare_digest(
-                str(envelope["mac"]), _tag("po", self.secret, payload)
-            ):
-                raise PermissionError("policy MAC is invalid")
-            return CollectionPolicyV1(
-                version=payload["version"], generation=payload["generation"],
-                activated_at_ns=payload["activated_at_ns"], expires_at_ns=payload["expires_at_ns"],
-                minimum_binding_version=payload["minimum_binding_version"],
-                enabled_boards={key: frozenset(value) for key, value in payload["enabled_boards"].items()},
-            )
+            return self.decode(raw)
         finally:
             receipt.close()
 
+    def decode(self, raw: bytes) -> CollectionPolicyV1:
+        """게시하거나 경로명을 다시 열지 않고 정책 바이트를 인증한다."""
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate policy object key")
+                result[key] = value
+            return result
+
+        envelope = json.loads(raw, object_pairs_hook=unique_object)
+        if not isinstance(envelope, dict) or set(envelope) != {"payload", "mac"}:
+            raise ValueError("policy envelope is invalid")
+        payload = envelope["payload"]
+        if not isinstance(payload, dict) or not hmac.compare_digest(
+            str(envelope["mac"]), self._mac(self.secret, payload)
+        ):
+            raise PermissionError("policy MAC is invalid")
+        schema = payload.get("schema_version")
+        if type(schema) is not int or schema not in {1, 2}:
+            raise ValueError("unsupported policy schema")
+        fields = {"schema_version", "version", "generation", "activated_at_ns",
+                  "expires_at_ns", "minimum_binding_version", "enabled_boards"}
+        if schema == 2:
+            fields.add("pair_activated_at_ns")
+        if set(payload) != fields:
+            raise ValueError("policy payload fields are invalid")
+        boards = payload["enabled_boards"]
+        if not isinstance(boards, dict):
+            raise ValueError("enabled boards must be an object")
+        for providers in boards.values():
+            if (not isinstance(providers, list) or not providers
+                    or any(not isinstance(item, str) for item in providers)
+                    or len(set(providers)) != len(providers)):
+                raise ValueError("enabled provider list is invalid")
+        return CollectionPolicyV1(
+            version=payload["version"], generation=payload["generation"],
+            activated_at_ns=payload["activated_at_ns"], expires_at_ns=payload["expires_at_ns"],
+            minimum_binding_version=payload["minimum_binding_version"],
+            enabled_boards={key: frozenset(value) for key, value in payload["enabled_boards"].items()},
+            schema_version=payload["schema_version"],
+            pair_activated_at_ns=payload.get("pair_activated_at_ns"),
+        )
+
+    @policy_writer
     def replace(self, policy: CollectionPolicyV1, *, expected_generation: int) -> None:
         current = self.load()
+        if policy.schema_version < current.schema_version:
+            raise ValueError("policy schema downgrade is prohibited")
         if current.generation != expected_generation or policy.generation != expected_generation + 1:
             raise RuntimeError("policy generation CAS failed")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -185,7 +235,7 @@ class OwnerPolicyFile:
             old_payload = self._payload(current)
             expected_raw = _canonical({
                 "payload": old_payload,
-                "mac": _tag("po", self.secret, old_payload),
+                "mac": self._mac(self.secret, old_payload),
             }) + b"\n"
             if old_raw != expected_raw:
                 expected_identity.close()
@@ -193,7 +243,7 @@ class OwnerPolicyFile:
         try:
             atomic_publish(
                 self.path,
-                _canonical({"payload": payload, "mac": _tag("po", self.secret, payload)}) + b"\n",
+                _canonical({"payload": payload, "mac": self._mac(self.secret, payload)}) + b"\n",
                 expected_identity=expected_identity,
             ).close()
         except BaseException:
@@ -266,6 +316,7 @@ class BindingStore:
                 producer_receipt=values["producer_receipt"], binding_ref=values["binding_ref"],
                 source_range_digest=values["source_range_digest"],
                 auth_tag=values["auth_tag"], issuer_id=values["issuer_id"],
+                codex_target_turn_id=values.get("codex_target_turn_id"),
             )
             if binding.board != board or binding.task != task:
                 raise PermissionError("binding sidecar scope mismatch")
@@ -305,11 +356,29 @@ class ConversationService:
         }
         if any(not root.is_absolute() for root in self.provider_roots.values()):
             raise ValueError("configured provider roots must be absolute")
+        self._runtime_admission: Callable[[], None] | None = None
         self._cursor_grants: dict[str, object] = {}
         self._lock = threading.RLock()
 
+    @contextmanager
+    def collection_operation(self):
+        # 중첩된 직접 호출도 가장 바깥 작업의 마지막 반환까지 잠금을 유지한다.
+        from .conversation_transaction import check_grant_fence
+        with policy_lease(self.policies.path):
+            check_grant_fence(self.policies.path, self.policies.secret)
+            if self._runtime_admission is not None:
+                self._runtime_admission()
+            yield
+            check_grant_fence(self.policies.path, self.policies.secret)
+            if self._runtime_admission is not None:
+                self._runtime_admission()
+
     def authorizes_principal(self, principal_id: str, board: str) -> bool:
-        return board in self.principal_board_grants.get(principal_id, frozenset())
+        try:
+            with self.collection_operation():
+                return board in self.principal_board_grants.get(principal_id, frozenset())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
 
     def _verify_task_receipt(
         self,
@@ -318,6 +387,7 @@ class ConversationService:
         board: str,
         task: str,
         policy: CollectionPolicyV1 | None = None,
+        provider: str | None = None,
     ) -> int:
         if self.kernel_secret is None or set(receipt) != {
             "schema", "issuer", "key_id", "board", "task", "observation",
@@ -343,8 +413,14 @@ class ConversationService:
         created_at_ns = receipt.get("created_at_ns")
         if isinstance(created_at_ns, bool) or not isinstance(created_at_ns, int) or created_at_ns <= 0:
             raise PermissionError("typed observation receipt creation time is invalid")
-        if policy is not None and created_at_ns < policy.activated_at_ns:
-            raise PermissionError("observation card predates policy activation")
+        if policy is not None:
+            if provider is None:
+                raise PermissionError("policy receipt verification requires provider")
+            activation = policy.activation_for(board, provider)
+            if activation is None:
+                raise PermissionError("policy denies board/provider")
+            if created_at_ns < activation:
+                raise PermissionError("observation card predates policy activation")
         return created_at_ns
 
     def _enabled_policy(self, board: str, provider: str) -> CollectionPolicyV1:
@@ -483,6 +559,7 @@ class ConversationService:
             position += len(chunk)
         return digest.hexdigest()
 
+    @collection_operation_entry
     def capture_hook_start(
         self,
         *,
@@ -500,6 +577,7 @@ class ConversationService:
             board=board,
             task=task,
             policy=policy,
+            provider=provider,
         )
         if not self.task_membership(board, task):
             raise PermissionError("task is not an observation member of this board")
@@ -534,6 +612,7 @@ class ConversationService:
             "receipt_nonce": task_receipt["nonce"],
         }
 
+    @collection_operation_entry
     def seal_hook_binding(
         self,
         *,
@@ -579,6 +658,7 @@ class ConversationService:
             board=board,
             task=task,
             policy=policy,
+            provider=provider,
         )
         if receipt_created_at_ns != verified_created_at_ns:
             raise PermissionError("prepared receipt creation time changed")
@@ -680,6 +760,31 @@ class ConversationService:
         self.bindings.put(binding=binding, locator=locator)
         return binding
 
+    @collection_operation_entry
+    def get_hook_final(self, *, board, task, task_receipt):
+        """인증된 생성 영수증과 같은 실행의 봉인에서만 카드용 공개 final을 얻는다."""
+        self._verify_task_receipt(task_receipt, board=board, task=task)
+        if not self.task_membership(board, task):
+            raise PermissionError("observation membership denied")
+        binding, _ = self.bindings.get(board, task)
+        policy = self._enabled_policy(board, binding.provider)
+        self._verify_task_receipt(task_receipt, board=board, task=task, policy=policy, provider=binding.provider)
+        if binding.producer_execution != task_receipt["nonce"]:
+            raise PermissionError("observation execution mismatch")
+        # 대화형 owner를 사칭하지 않고 검증된 생성 실행에만 projection을 한정한다.
+        page = self._project_parent_page(
+            principal_id="observation:" + str(task_receipt["nonce"]),
+            board=board, task=task, cursor=None, limit=100, expected_binding=binding,
+        )
+        if page.get("next_cursor") or page.get("has_more"):
+            return None
+        finals = [event for event in page["events"] if event["kind"] == "final_assistant"]
+        if len(finals) != 1 or finals[0].get("redaction") not in {"not_applicable", "applied"}:
+            return None
+        text = finals[0].get("text")
+        return text if isinstance(text, str) and text.strip() else None
+
+    @collection_operation_entry
     def get_parent_page(
         self,
         *,
@@ -702,29 +807,44 @@ class ConversationService:
             raise PermissionError("explicit board grant required")
         if not self.task_membership(board, task):
             raise PermissionError("task membership denied before collection access")
+        return self._project_parent_page(
+            principal_id=principal.principal_id, board=board, task=task, cursor=cursor, limit=limit,
+        )
+
+    @collection_operation_entry
+    def _project_parent_page(self, *, principal_id, board, task, cursor, limit, expected_binding=None):
+        """호출자가 인증한 task 범위에 기존 정책/서명/원본 projection 검증을 적용한다."""
         policy = self.policies.load()
         if board not in policy.enabled_boards:
             raise PermissionError("collection policy denies board")
         binding, locator = self.bindings.get(board, task)
+        if expected_binding is not None and binding != expected_binding:
+            raise PermissionError("hook binding changed")
         now_ns = self.clock_ns()
         if not policy.allows(board, binding.provider, binding.binding_version, now_ns):
             raise PermissionError("collection policy denies binding")
         policy_store = self.authority.create_policy_store()
         policy_store.replace(policy)
         if binding.provider == "codex":
-            projector = CodexProjector()
+            from .transcript_projection import CodexTargetTurnProjector
+            projector = (
+                CodexTargetTurnProjector()
+                if binding.schema_pin == CodexTargetTurnProjector.schema_pin
+                else CodexProjector()
+            )
         elif binding.provider == "claude":
             projector = ClaudeProjector()
             from .claude_absent import SCHEMA_PIN
-            if binding.schema_pin == SCHEMA_PIN:
-                projector.schema_pin = SCHEMA_PIN
+            from .claude_file_provenance import SCHEMA_PIN as FILE_V2_PIN
+            if binding.schema_pin in {SCHEMA_PIN, FILE_V2_PIN}:
+                projector.schema_pin = binding.schema_pin
         else:
             raise PermissionError("provider source projection remains disabled")
         with self._lock:
             grant = self._cursor_grants.get(cursor) if cursor is not None else None
             if grant is None:
                 principal_receipt = self.authority.issue_principal_scope(
-                    principal=principal.principal_id,
+                    principal=principal_id,
                     board=board,
                     task=task,
                     expires_at_ns=min(policy.expires_at_ns, now_ns + 60_000_000_000),
@@ -757,6 +877,7 @@ class ConversationService:
             result["completeness"] = "partial"
         return result
 
+    @collection_operation_entry
     def get_child_links(self, *, principal_id: str, board: str, task: str) -> dict[str, object]:
         if not self.authorizes_principal(principal_id, board):
             raise PermissionError("explicit board grant required")

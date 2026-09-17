@@ -51,6 +51,60 @@ _TASK_RE = re.compile(r"t_[A-Za-z0-9]+\Z")
 _IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}\Z")
 
 
+def _git_metadata_line(path: Path) -> str:
+    """실행/설정 로딩 없이 작은 Git 포인터 파일만 읽는다."""
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("not a regular Git metadata file")
+    with path.open("rb") as handle:
+        raw = handle.read(8193)
+    if len(raw) > 8192:
+        raise ValueError("oversized Git metadata")
+    value = os.fsdecode(raw).removesuffix("\n")
+    if not value or "\n" in value or "\x00" in value:
+        raise ValueError("invalid Git metadata")
+    return value
+
+
+def _registered_git_root(current: Path) -> tuple[Path, Path] | None:
+    """표준 Git 루트와 공통 디렉터리를 양방향 등록으로 검증한다.
+
+    Git 프로세스를 실행하지 않아 PATH/GIT_* 및 include/fsmonitor/hooks 설정을
+    신뢰하지 않는다. 별도 git-dir, submodule, 손상된 등록은 보수적으로 거절한다.
+    """
+    try:
+        if not current.is_dir():
+            return None
+        for root in (current, *current.parents):
+            marker = root / ".git"
+            if not marker.exists() and not marker.is_symlink():
+                continue
+            if marker.is_symlink():
+                return None
+            if marker.is_dir():
+                common = marker.resolve(strict=True)
+            else:
+                pointer = _git_metadata_line(marker)
+                if not pointer.startswith("gitdir: "):
+                    return None
+                gitdir = (root / pointer[8:]).resolve(strict=True)
+                common = (gitdir / _git_metadata_line(gitdir / "commondir")).resolve(strict=True)
+                # common/worktrees/<id> 등록과 worktree .git의 역참조가 모두 필요하다.
+                if gitdir.parent != common / "worktrees":
+                    return None
+                backlink = _git_metadata_line(gitdir / "gitdir")
+                if not Path(backlink).is_absolute() or Path(backlink).resolve(strict=True) != marker:
+                    return None
+                if not (gitdir / "HEAD").is_file():
+                    return None
+            if not ((common / "HEAD").is_file() and (common / "objects").is_dir()
+                    and (common / "refs").is_dir()):
+                return None
+            return root, common
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return None
+
+
 @dataclass
 class HermesCliBackend:
     """Hermes CLI를 통해 검증된 observation 카드를 생성하고 변경한다."""
@@ -58,7 +112,7 @@ class HermesCliBackend:
     runner: Runner = run_command
 
     def resolve_board(self, *, cwd: Path) -> str:
-        """``cwd``를 포함하는 매핑 중 유일하게 가장 깊은 Dashboard 프로젝트 매핑을 선택한다."""
+        """최장 명시 매핑 우선, 없으면 검증된 동일 Git 저장소의 유일한 보드를 선택한다."""
         raw = self.runner(["hermes", "kanban", "boards", "list", "--json"])
         try:
             boards = json.loads(raw)
@@ -69,6 +123,7 @@ class HermesCliBackend:
 
         current = cwd.resolve()
         matches: list[tuple[int, str]] = []
+        mappings: list[tuple[Path, str]] = []
         for board in boards:
             if not isinstance(board, dict):
                 raise RuntimeError("Hermes board list contained a non-object entry")
@@ -90,10 +145,27 @@ class HermesCliBackend:
                     "Hermes board list contained a non-absolute project directory"
                 )
             root = requested.resolve()
+            mappings.append((root, slug))
             if current == root or root in current.parents:
                 matches.append((len(root.parts), slug))
 
         if not matches:
+            # 명시적 최장 경로가 없을 때만 동일 저장소 등록을 비교한다.
+            # 하위 폴더 매핑을 저장소 전체로 확장하거나 없는 루트를 사용하지 않는다.
+            identity = _registered_git_root(current)
+            if identity is not None:
+                candidates = []
+                for root, slug in mappings:
+                    mapped = _registered_git_root(root)
+                    if mapped is not None and mapped[0] == root and mapped[1] == identity[1]:
+                        candidates.append(slug)
+                if len(candidates) > 1:
+                    raise RuntimeError(
+                        "multiple Kanban boards map to this Git repository: "
+                        + ", ".join(sorted(candidates))
+                    )
+                if candidates:
+                    return candidates[0]
             raise BoardNotMappedError(
                 "no Kanban board is mapped to this directory; set Project directory "
                 "when creating the board in Hermes Dashboard"

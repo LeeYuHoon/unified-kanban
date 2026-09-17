@@ -438,7 +438,25 @@ def test_native_hook_adapter_kernel_cli_fd_chain(monkeypatch, tmp_path: Path):
         "git", "checkout", "--quiet", carried_tip,
     ], cwd=expected_release, check=True)
     release_bin = expected_release / "venv/bin"
-    release_bin.mkdir(parents=True)
+    # setup과 같은 실제 venv를 만들고 native 소스와 의존성을 설치 경로에 둔다.
+    subprocess.run([
+        str(source_python), "-m", "venv", "--without-pip",
+        str(expected_release / "venv"),
+    ], check=True)
+    release_python = release_bin / "python"
+    site_probe = "import sysconfig; print(sysconfig.get_path('purelib'))"
+    release_site = Path(subprocess.check_output(
+        [str(release_python), "-I", "-c", site_probe], text=True,
+    ).strip())
+    native_site = subprocess.check_output(
+        [str(source_python), "-I", "-c", site_probe], text=True,
+    ).strip()
+    (release_site / "native-fixture.pth").write_text(f"{source_root}\n{native_site}\n")
+    runtime_probe = subprocess.check_output([
+        str(release_python), "-I", "-c",
+        "import sys, hermes_cli; assert sys.version_info >= (3, 11); print(sys.executable)",
+    ], text=True)
+    assert runtime_probe.strip() == str(release_python)
     release_hermes = release_bin / "hermes"
     release_hermes.write_text(
         f"#!/bin/sh\nexec {source_python} -m hermes_cli.main \"$@\"\n"

@@ -8,9 +8,12 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import runpy
 import stat
 from typing import cast
 
+
+managed_tui_environment = runpy.run_path(str(Path(__file__).with_name("hermes-release-manager.py")))["managed_tui_environment"]
 
 LABEL = "ai.hermes.gateway"
 RELEASE_RE = re.compile(r"release-[0-9a-f]{40}")
@@ -109,6 +112,10 @@ def render(source: Path, candidate: Path, release_root: Path) -> None:
     payload = stable_plist(source)
     validate_authority(payload, release_root)
     environment = cast(dict[str, str], payload["EnvironmentVariables"]).copy()
+    for key in list(environment):
+        if key.startswith(("DYLD_", "LD_")) or key in ("NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONHOME"):
+            environment.pop(key)
+    environment.update(managed_tui_environment(Path(payload["ProgramArguments"][0]).parents[2]))
     environment["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
     environment["HERMES_LAZY_INSTALL_TARGET"] = str(release_root / "lazy-packages")
     payload["EnvironmentVariables"] = environment

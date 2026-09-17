@@ -82,7 +82,14 @@ def _render_in_external_stage(
     plugin_source: Path,
     action: str,
     hermes_cli: Path,
+    dashboard_oauth: bool = False,
 ) -> bytes:
+    if dashboard_oauth:
+        from dashboard_oauth_config import parse_config, unrelated_config
+
+        if action != "enable":
+            raise ValueError("Dashboard OAuth is enable-only")
+        before = unrelated_config(parse_config(baseline[0] if baseline else None))
     stage_fd = os.open(stage_path, _DIR_FLAGS)
     try:
         os.mkdir("plugins", 0o700, dir_fd=stage_fd)
@@ -120,9 +127,20 @@ def _render_in_external_stage(
             cwd=stage_path,
         )
 
+        if dashboard_oauth:
+            subprocess.run(
+                [str(hermes_cli), "config", "set", "dashboard.require_auth", "true"],
+                env=env, check=True, close_fds=True, cwd=stage_path,
+            )
         rendered = _read_optional(stage_fd, "config.yaml")
         if rendered is None:
             raise RuntimeError("Hermes staged plugin operation did not produce config.yaml")
+        if dashboard_oauth:
+            config = parse_config(rendered[0])
+            if config.get("dashboard", {}).get("require_auth") is not True:
+                raise RuntimeError("Dashboard OAuth setter did not persist strict true")
+            if unrelated_config(config) != before:
+                raise RuntimeError("Dashboard OAuth CLI changed unrelated configuration")
         return rendered[0]
     finally:
         os.close(stage_fd)
@@ -135,6 +153,7 @@ def stage(
     plugin_source: Path,
     action: str,
     hermes_cli: Path,
+    dashboard_oauth: bool = False,
 ) -> None:
     baseline_name = _transaction_name(baseline_path)
     output_name = _transaction_name(output_path)
@@ -143,7 +162,7 @@ def stage(
         stage_path = Path(stage)
         stage_path.chmod(0o700)
         rendered = _render_in_external_stage(
-            stage_path, baseline, plugin_source, action, hermes_cli
+            stage_path, baseline, plugin_source, action, hermes_cli, dashboard_oauth
         )
     _write_exclusive(root_fd, output_name, rendered, 0o600)
 
@@ -156,6 +175,7 @@ def main() -> int:
     parser.add_argument("plugin_source", type=Path)
     parser.add_argument("action", choices=("enable", "disable"))
     parser.add_argument("hermes_cli", type=Path)
+    parser.add_argument("--dashboard-oauth", action="store_true")
     args = parser.parse_args()
     stage(
         args.transaction_fd,
@@ -164,6 +184,7 @@ def main() -> int:
         args.plugin_source,
         args.action,
         args.hermes_cli,
+        args.dashboard_oauth,
     )
     return 0
 

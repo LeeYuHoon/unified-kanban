@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from .conversation_transaction import collection_operation
+
 import hashlib
 import hmac
 import json
@@ -20,6 +22,7 @@ from .conversation import (
     open_verified_jsonl_fd, open_verified_root,
 )
 from .transcript_projection import ClaudeProjector
+from .claude_native_ancestry import add_attachment
 
 SCHEMA_PIN = ClaudeProjector.schema_pin + ":claude-2.1.268-absent-limited-partial-v1"
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
@@ -69,13 +72,14 @@ def _ancestry(locator, *, absent=False, expected=None):
                 os.close(fd)
 
 
+@collection_operation
 def capture(service, *, board, task, session, source_path, task_receipt, prompt_id):
     if not isinstance(prompt_id, str) or not _UUID.fullmatch(prompt_id):
         return None
     if not isinstance(session, str) or not session:
         return None
     policy = service._enabled_policy(board, "claude")
-    created = service._verify_task_receipt(task_receipt, board=board, task=task, policy=policy)
+    created = service._verify_task_receipt(task_receipt, board=board, task=task, policy=policy, provider="claude")
     if not service.task_membership(board, task):
         raise PermissionError("observation membership required")
     locator = service._locator("claude", Path(source_path))
@@ -96,6 +100,8 @@ def _range(raw, session, prompt_id):
     start = end = None
     position = 0
     seen = set()
+    identities = set()  # 알 수 없는 레코드는 조상 관계를 연결하거나 UUID를 가리지 않는다.
+    turn_seen = set()
     records = 0
     deadline = time.monotonic() + JSONL_SCAN_DEADLINE_MS / 1000
     for line in raw.splitlines(keepends=True):
@@ -118,10 +124,14 @@ def _range(raw, session, prompt_id):
             if name in record and (not isinstance(record[name], str) or not record[name]):
                 raise PermissionError("invalid absent snapshot identity field")
         parent = record.get("parentUuid")
+
         if parent is not None and (not isinstance(parent, str) or not parent):
             raise PermissionError("invalid absent snapshot parent")
         if "sessionId" in record and record["sessionId"] != session:
             raise PermissionError("absent snapshot session mismatch")
+        if kind == "attachment":
+            add_attachment(record, session=session, active_prompt=prompt_id if start is not None else None,
+                           seen=seen, turn_seen=turn_seen)
         if kind in {"user", "assistant"}:
             if record.get("sessionId") != session or not ClaudeProjector()._public_entry(record):
                 raise PermissionError("ambiguous absent snapshot conversation")
@@ -157,6 +167,8 @@ def _range(raw, session, prompt_id):
                 start = position
             elif start is None:
                 raise PermissionError("conversation precedes prompt boundary")
+            elif parent not in turn_seen:
+                raise PermissionError("unbound message parent")
             if record.get("promptId", prompt_id) != prompt_id:
                 raise PermissionError("cross-prompt conversation")
             uuid = record.get("uuid")
@@ -167,6 +179,11 @@ def _range(raw, session, prompt_id):
             if not seen and parent is not None:
                 raise PermissionError("first prompt has preexisting parent")
             seen.add(uuid)
+            turn_seen.add(uuid)
+        if "uuid" in record:
+            if record["uuid"] in identities:
+                raise PermissionError("duplicate native record identity")
+            identities.add(record["uuid"])
         position += len(line)
         if start is not None:
             end = position
@@ -175,14 +192,17 @@ def _range(raw, session, prompt_id):
     return start, end
 
 
+@collection_operation
 def seal(service, *, board, task, prepared, task_receipt, prompt_id):
     body = {k: v for k, v in prepared.items() if k != "mac"}
     if not hmac.compare_digest(str(prepared.get("mac", "")), _mac(service, body)):
         raise PermissionError("absent receipt authentication failed")
+    if body.get("mode") != "claude-absent-v1":
+        raise PermissionError("absent receipt mode mismatch")
     if (body["board"], body["task"], body["prompt_id"], body["receipt_nonce"]) != (board, task, prompt_id, task_receipt.get("nonce")):
         raise PermissionError("absent receipt prompt/task replay")
     policy = service._enabled_policy(board, "claude")
-    created = service._verify_task_receipt(task_receipt, board=board, task=task, policy=policy)
+    created = service._verify_task_receipt(task_receipt, board=board, task=task, policy=policy, provider="claude")
     if (created, policy.generation, policy.version) != (body["receipt_created_at_ns"], body["policy_generation"], body["policy_version"]):
         raise PermissionError("absent receipt policy changed")
     if not service.task_membership(board, task):
@@ -231,3 +251,132 @@ def seal(service, *, board, task, prepared, task_receipt, prompt_id):
         raise PermissionError("absent snapshot policy changed before publication")
     service.bindings.put(binding=binding, locator=locator)
     return binding
+
+
+FINAL_MODE = "claude-absent-first-open-final-v1"
+
+
+def _final_authorize(service, prepared, *, board, task, task_receipt, prompt_id, mode,
+                     reconcile_existing=False):
+    body = {k: v for k, v in prepared.items() if k != "mac"}
+    if not hmac.compare_digest(str(prepared.get("mac", "")), _mac(service, body)):
+        raise PermissionError("absent preparation authentication failed")
+    if (body.get("mode"), body.get("provider"), body.get("board"), body.get("task"),
+            body.get("prompt_id"), body.get("receipt_nonce")) != (
+            mode, "claude", board, task, prompt_id, task_receipt.get("nonce")):
+        raise PermissionError("absent preparation scope mismatch")
+    if not isinstance(prompt_id, str) or not _UUID.fullmatch(prompt_id):
+        raise PermissionError("native prompt UUID required")
+    policy = service._enabled_policy(board, "claude")
+    created = service._verify_task_receipt(task_receipt, board=board, task=task, policy=policy, provider="claude")
+    if (created, policy.generation, policy.version) != (
+            body["receipt_created_at_ns"], body["policy_generation"], body["policy_version"]):
+        raise PermissionError("absent preparation policy changed")
+    if not service.task_membership(board, task):
+        raise PermissionError("observation membership required")
+    if not reconcile_existing:
+        try:
+            service.bindings.get(board, task)
+        except FileNotFoundError:
+            pass
+        else:
+            raise PermissionError("existing immutable binding cannot be final-sealed")
+    locator = service._locator("claude", Path(body["allowed_root"]) / body["relative_path"])
+    if str(locator.allowed_root) != body["allowed_root"]:
+        raise PermissionError("absent source root configuration changed")
+    return body, policy, created, locator
+
+
+@collection_operation
+def prepare_final(service, *, board, task, prepared, task_receipt, prompt_id):
+    """최초 안전한 open을 인증 준비로 고정한다. 반환값을 재시도 전에 영속 저장한다.
+
+    이 함수는 최초 부재 증거에 한 번만 적용한다. 재시도는 반드시 seal_final에
+    반환된 준비를 전달한다. 실패한 준비를 버리고 원래 부재 증거로 재고정하지 않는다.
+    """
+    from .claude_file_provenance import _snapshot
+    body, policy, _, locator = _final_authorize(
+        service, prepared, board=board, task=task, task_receipt=task_receipt,
+        prompt_id=prompt_id, mode="claude-absent-v1")
+    ancestors = _ancestry(locator, expected=body["ancestors"])
+    raw, _, identity, selected = _snapshot(
+        service, locator, ancestors, lambda raw: _range(raw, body["session"], prompt_id))
+    # 미완성 첫 줄도 그대로 해시하여 다음 open에서 다른 파일로 갈아타지 못하게 한다.
+    pin = dict(body, mode=FINAL_MODE, absent_ancestors=body["ancestors"], ancestors=ancestors,
+               source_identity=service._identity_payload(identity), captured_eof=len(raw),
+               prefix_digest=hashlib.sha256(raw).hexdigest(),
+               start_offset=selected[0] if selected else None)
+    if service._enabled_policy(board, "claude") != policy:
+        raise PermissionError("absent preparation policy changed before pin")
+    return {**pin, "mac": _mac(service, pin)}
+
+
+@collection_operation
+def seal_final(service, *, board, task, prepared, task_receipt, prompt_id,
+               reconcile_existing=False):
+    """고정된 최초 inode에서만 final을 기다린다. pending은 공개 binding이 없다."""
+    from .claude_file_provenance import _snapshot, _has_public_final, SCHEMA_PIN as FILE_SCHEMA_PIN
+    body, policy, created, locator = _final_authorize(
+        service, prepared, board=board, task=task, task_receipt=task_receipt,
+        prompt_id=prompt_id, mode=FINAL_MODE, reconcile_existing=reconcile_existing)
+    existing = None
+    try:
+        existing = service.bindings.get(board, task)
+    except FileNotFoundError:
+        pass
+    _ancestry(locator, expected=body["absent_ancestors"])
+    # 부재 시작은 이전 공개 대화 없이 검증된 attachment preamble만 허용한다.
+    raw, root_identity, identity, selected = _snapshot(
+        service, locator, body["ancestors"], lambda raw: _range(raw, body["session"], prompt_id))
+    original = body["source_identity"]
+    if (identity.device, identity.inode) != (original["device"], original["inode"]):
+        raise PermissionError("absent first-open source identity changed")
+    eof = body["captured_eof"]
+    if eof != original["size"] or len(raw) < eof or hashlib.sha256(raw[:eof]).hexdigest() != body["prefix_digest"]:
+        raise PermissionError("absent first-open prefix changed")
+    if selected is not None and body["start_offset"] is not None and selected[0] != body["start_offset"]:
+        raise PermissionError("absent first-open request boundary changed")
+    if service._enabled_policy(board, "claude") != policy:
+        raise PermissionError("absent final policy changed during snapshot")
+    if selected is None or not _has_public_final(raw[selected[0]:selected[1]]):
+        if existing is not None:
+            raise PermissionError("existing immutable binding is not final-ready")
+        return {"status": "pending", "binding": None}
+    start, end = selected
+    if existing is not None:
+        from dataclasses import replace
+        binding, stored_locator = existing
+        service.authority._validate_binding(binding)
+        # 최초 pin과 현재 범위로 전 필드를 비교한다. 발행/범위 확장은 하지 않는다.
+        expected = replace(
+            binding, board=board, task=task, provider="claude", schema_pin=FILE_SCHEMA_PIN,
+            profile_root_identity=root_identity, locator_ref=service.authority._locator_ref(locator),
+            source_identity=identity, session=body["session"],
+            turn_start=SourceBoundaryV1(byte_offset=start, ordinal=0),
+            turn_end=SourceBoundaryV1(byte_offset=end, ordinal=raw[start:end].count(b"\n")),
+            boundary_alignment_proof="producer_jsonl_lines_v1", binding_version=2, generation=1,
+            policy_version=policy.version, producer_execution=str(task_receipt["nonce"]),
+            created_at_ns=created, source_range_digest=hashlib.sha256(raw[start:end]).hexdigest(),
+            issuer_id=service.authority.issuer_id, codex_target_turn_id=None)
+        if stored_locator != locator or binding != expected:
+            raise PermissionError("existing immutable binding differs from absent final scope")
+        if service._enabled_policy(board, "claude") != policy or not service.task_membership(board, task):
+            raise PermissionError("absent final authority changed during reconciliation")
+        if service.bindings.get(board, task) != existing:
+            raise PermissionError("immutable binding changed during reconciliation")
+        return {"status": "ready", "binding": binding}
+    # 이미 검증한 네이티브 범위에는 별도 v2 권한만 쓰며 공통 EOF 계약은 그대로 둔다.
+    pending = service.authority.begin_binding(
+        board=board, task=task, provider="claude", schema_pin=FILE_SCHEMA_PIN,
+        profile_root_identity=root_identity, locator=locator, source_identity=identity,
+        session=body["session"], turn_start=SourceBoundaryV1(byte_offset=start, ordinal=0),
+        binding_version=2, generation=1, policy_version=policy.version,
+        producer_execution=str(task_receipt["nonce"]), now_ns=created)
+    binding = service.authority.seal_binding(
+        pending, turn_end=SourceBoundaryV1(byte_offset=end, ordinal=raw[start:end].count(b"\n")),
+        source_identity=identity, expected_generation=1, now_ns=service.clock_ns(),
+        source_range_digest=hashlib.sha256(raw[start:end]).hexdigest())
+    if service._enabled_policy(board, "claude") != policy:
+        raise PermissionError("absent final policy changed before publication")
+    service.bindings.put(binding=binding, locator=locator)
+    return {"status": "ready", "binding": binding}

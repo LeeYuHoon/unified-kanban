@@ -10,6 +10,7 @@ ORIGINAL_ARGS=("$@")
 DRY_RUN=0
 SKIP_SMOKE=0
 NO_RESTART=0
+DASHBOARD_OAUTH=0
 PROJECT_DIR=""
 BOARD=""
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unified-kanban"
@@ -26,6 +27,7 @@ Usage: ./scripts/setup.sh [options]
   --dry-run                 Print actions without writing
   --skip-smoke              Do not run the smoke test
   --no-restart              Do not restart Hermes gateway
+  --dashboard-oauth         Reuse existing official local Dashboard registration
   --project-dir ABS_PATH    Project directory to configure
   --board SLUG              Board for --project-dir (required together)
 EOF
@@ -36,6 +38,7 @@ while (($#)); do
     --dry-run) DRY_RUN=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     --no-restart) NO_RESTART=1 ;;
+    --dashboard-oauth) DASHBOARD_OAUTH=1 ;;
     --project-dir)
       if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then
         echo "Missing value for --project-dir" >&2; exit 2
@@ -117,6 +120,17 @@ normalize_absolute_path() {
 }
 HERMES_HOME="$(normalize_absolute_path "$HERMES_HOME" HERMES_HOME)" || exit 1
 AGENT_REPO="$(normalize_absolute_path "$AGENT_REPO" HERMES_AGENT_REPO)" || exit 1
+if ((DASHBOARD_OAUTH)); then
+  if ((DRY_RUN)); then
+    echo "DRY RUN: would validate existing Dashboard registration offline and stage dashboard.require_auth=true."
+    echo "Runtime/registration not checked; no bootstrap, prepare, authentication, or config writes."
+    exit 0
+  fi
+  if [[ ! -d "$AGENT_REPO/hermes_cli" || ! -x "$AGENT_REPO/venv/bin/python" ]]; then
+    echo "Dashboard OAuth requires an existing Hermes native runtime. Install Hermes first, then run: hermes auth add nous; hermes dashboard register" >&2
+    exit 1
+  fi
+fi
 BOOTSTRAP_RECEIPT="$STATE_DIR/hermes-bootstrap.receipt"
 BOOTSTRAP_HELPER="$REPO_ROOT/scripts/bootstrap-hermes-macos.sh"
 HERMES_BOOTSTRAP_MANAGED=0
@@ -129,6 +143,10 @@ if [[ -d "$AGENT_REPO" ]]; then
     echo "Unexpected Hermes path validation status: $PATH_STATUS" >&2
     exit 1
   }
+fi
+if ((DASHBOARD_OAUTH)); then
+  HERMES_HOME="$HERMES_HOME" "$AGENT_REPO/venv/bin/python" -B \
+    "$REPO_ROOT/scripts/setup-dashboard-oauth.py" "$AGENT_REPO" --registration-only
 fi
 if [[ ! -d "$AGENT_REPO" ]]; then
   if command -v hermes >/dev/null 2>&1; then
@@ -378,8 +396,13 @@ stage_hermes_plugin_config() {
   local candidate="$TRANSACTION_DIR/hermes-config-candidate-$TRANSACTION_STAGE"
   python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
     "$TRANSACTION_RECEIPT" "$HERMES_CONFIG" "$baseline"
-  python3 "$REPO_ROOT/scripts/stage-hermes-plugin-config.py" \
-    9 "$baseline" "$candidate" "$HERMES_PLUGIN_SOURCE" "$action" "$HERMES_CLI"
+  if ((DASHBOARD_OAUTH)); then
+    "$HERMES_RELEASE/venv/bin/python" -B "$REPO_ROOT/scripts/stage-hermes-plugin-config.py" \
+      9 "$baseline" "$candidate" "$HERMES_PLUGIN_SOURCE" "$action" "$HERMES_CLI" --dashboard-oauth
+  else
+    python3 "$REPO_ROOT/scripts/stage-hermes-plugin-config.py" \
+      9 "$baseline" "$candidate" "$HERMES_PLUGIN_SOURCE" "$action" "$HERMES_CLI"
+  fi
   next_stage_receipt
   python3 "$REPO_ROOT/scripts/path-transaction.py" replace-file \
     "$TRANSACTION_RECEIPT" "$candidate" "$HERMES_CONFIG" "$STAGE_RECEIPT"
@@ -549,6 +572,10 @@ run python3 "$REPO_ROOT/scripts/install-claude-hooks.py" batch-validate \
   "$CODEX_SETTINGS" "$CODEX_HOOK_LINK"
 
 if ((!DRY_RUN)); then
+  if ((DASHBOARD_OAUTH)); then
+    HERMES_HOME="$HERMES_HOME" "$HERMES_RELEASE/venv/bin/python" -B \
+      "$REPO_ROOT/scripts/setup-dashboard-oauth.py" "$HERMES_RELEASE"
+  fi
   if [[ "${UNIFIED_KANBAN_SETUP_TRANSACTION_CHILD:-}" != 1 ]]; then
     exec python3 "$REPO_ROOT/scripts/setup-transaction-runner.py" \
       "$REPO_ROOT" "$STATE_DIR" "$REPO_ROOT/scripts/setup.sh" \
@@ -607,7 +634,7 @@ if ((!DRY_RUN)); then
       set +e
       INSTALLED_BASELINE="$(python3 "$REPO_ROOT/scripts/hermes-release-manager.py" \
         launcher-baseline "$AGENT_REPO" "$SUPPORTED_UPSTREAM" "$FINAL_CARRIED_COMMIT" \
-        "$ORIGINAL_HERMES_LAUNCHER" 2>"$LAUNCHER_CLASSIFY_ERROR")"
+        "$ORIGINAL_HERMES_LAUNCHER" --accept-legacy 2>"$LAUNCHER_CLASSIFY_ERROR")"
       INSTALLED_BASELINE_STATUS=$?
       set -e
       if ((INSTALLED_BASELINE_STATUS != 0 && INSTALLED_BASELINE_STATUS != 3)); then
@@ -800,6 +827,10 @@ if ((SKIP_SMOKE == 0 && HERMES_BOOTSTRAP_MANAGED == 0)); then
   run_without_transaction_authority "$REPO_ROOT/scripts/kanban-smoke.sh"
 fi
 
+if ((DASHBOARD_OAUTH)); then
+  echo "Dashboard OAuth configured; activation pending: restart the standalone Dashboard on 127.0.0.1."
+  echo "Gateway restart does not verify Dashboard authentication; live login/gate not checked."
+fi
 cat <<'EOF'
 Unified Kanban setup complete.
 Next: open Hermes Dashboard > Kanban, create a board, and set Project directory.

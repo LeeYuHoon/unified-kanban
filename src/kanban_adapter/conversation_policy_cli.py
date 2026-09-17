@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .conversation import CollectionPolicyV1
 from .conversation_integration import OwnerPolicyFile
+from .conversation_transaction import policy_lease
 
 
 def _secret(path: Path) -> bytes:
@@ -52,7 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     enable.add_argument("--now-ns", type=int)
     disable = commands.add_parser("disable")
     disable.add_argument("--board", required=True)
+    disable.add_argument("--provider", action="append", choices=("claude", "claude-code", "codex", "hermes"),
+                         help="생략하면 보드 전체, 지정하면 해당 provider만 해제")
     disable.add_argument("--now-ns", type=int)
+    commands.add_parser("migrate", help="범위·만료·기존 cutoff를 보존해 서명 schema 2로 이전")
     return parser
 
 
@@ -60,28 +64,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         store = OwnerPolicyFile(args.policy_file.resolve(), secret=_secret(args.secret_file.resolve()))
-        current = store.load()
-        now_ns = args.now_ns if args.now_ns is not None else time.time_ns()
-        enabled = dict(current.enabled_boards)
-        if args.command == "enable":
-            # CLI 입력의 별칭만 서명 전에 정규화하고 기존 서명 정책은 그대로 검증한다.
-            enabled[args.board] = frozenset(
-                "claude" if provider == "claude-code" else provider
-                for provider in args.provider
+        with policy_lease(store.path, exclusive=True, create=True):
+            current = store.load()
+            explicit_now = getattr(args, "now_ns", None)
+            now_ns = explicit_now if explicit_now is not None else time.time_ns()
+            enabled = dict(current.enabled_boards)
+            expires_at_ns = current.expires_at_ns
+            if args.command == "enable":
+                if now_ns >= current.expires_at_ns:
+                    raise ValueError("expired policy requires a separate explicit renewal")
+                if store.path.exists() and args.expires_at_ns != current.expires_at_ns:
+                    raise ValueError("enable must preserve existing expiry; renewal is separate")
+                # CLI 입력의 별칭만 서명 전에 정규화하고 기존 서명 정책은 그대로 검증한다.
+                enabled[args.board] = enabled.get(args.board, frozenset()) | frozenset(
+                    "claude" if provider == "claude-code" else provider
+                    for provider in args.provider
+                )
+                expires_at_ns = args.expires_at_ns
+            elif args.command == "disable":
+                if args.provider:
+                    # 별칭 해제는 canonical 권한도 철회하되 과거 별칭 항목도 제거한다.
+                    revoked = frozenset(args.provider) | frozenset(
+                        "claude" if provider == "claude-code" else provider
+                        for provider in args.provider
+                    )
+                    remaining = enabled.get(args.board, frozenset()) - revoked
+                    if remaining:
+                        enabled[args.board] = remaining
+                    else:
+                        enabled.pop(args.board, None)
+                else:
+                    enabled.pop(args.board, None)
+            replacement = CollectionPolicyV1(
+                version=current.version,
+                generation=current.generation + 1,
+                activated_at_ns=current.activated_at_ns,
+                expires_at_ns=expires_at_ns,
+                enabled_boards=enabled,
+                minimum_binding_version=current.minimum_binding_version,
+                schema_version=2,
+                pair_activated_at_ns={
+                    board: {provider: (cutoff if (cutoff := current.activation_for(board, provider)) is not None else now_ns)
+                            for provider in providers}
+                    for board, providers in enabled.items()
+                },
             )
-            expires_at_ns = args.expires_at_ns
-        else:
-            enabled.pop(args.board, None)
-            expires_at_ns = max(current.expires_at_ns, now_ns + 1)
-        replacement = CollectionPolicyV1(
-            version=current.version,
-            generation=current.generation + 1,
-            activated_at_ns=now_ns,
-            expires_at_ns=expires_at_ns,
-            enabled_boards=enabled,
-            minimum_binding_version=current.minimum_binding_version,
-        )
-        store.replace(replacement, expected_generation=current.generation)
+            store.replace(replacement, expected_generation=current.generation)
     except (OSError, PermissionError, RuntimeError, TypeError, ValueError) as error:
         print(f"kanban-conversation-policy: {error}", file=sys.stderr)
         return 1

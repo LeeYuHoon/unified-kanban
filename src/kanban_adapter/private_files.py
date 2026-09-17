@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import ctypes
+import fcntl
 import os
 import secrets
 import stat
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 Identity = tuple[int, int]
 _RENAME_SWAP = 0x00000002
@@ -116,6 +119,16 @@ class CommittedPublicationError(RuntimeError):
 
 class NamespaceAuthorityError(RuntimeError):
     """공개 정식(canonical) 이름을 검증된 inode로 복원할 수 없었다."""
+
+    def __init__(self, message: str, *, retained_paths: tuple[Path, ...] = (),
+                 receipts: tuple[Receipt, ...] = (), canonical_authority: str = "unknown") -> None:
+        self.retained_paths = retained_paths
+        self.receipts = receipts
+        self.canonical_authority = canonical_authority
+        detail = f"; canonical authority={canonical_authority}"
+        if retained_paths:
+            detail += "; retained paths=" + ", ".join(map(str, retained_paths))
+        super().__init__(message + detail)
 
 
 def _renameatx(directory_fd: int, source: str, destination: str, flags: int) -> None:
@@ -463,12 +476,117 @@ def read_bytes(path: Path, *, directory_fd: int | None = None) -> tuple[bytes, R
         raise
 
 
+def _recover_replacement(path: Path, producer: Receipt, displaced_name: str) -> NoReturn:
+    """교환 롤백 대신 분리 후 배타 복원한다. 실패 시 capability를 보존한다."""
+    parent = producer.directory_fd
+    detached_name = _random_name(f"{path.name}.detached")
+    displaced: Receipt | None = None
+    detach_attempted = False
+    restored = False
+    try:
+        # 외부 leaf의 내용을 읽거나 FIFO에서 대기하지 않고 inode만 고정한다.
+        fd = os.open(displaced_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=parent)
+        try:
+            displaced = _receipt(parent, fd, displaced_name)
+        except BaseException:
+            os.close(fd)
+            raise
+        _validate_receipt(displaced)
+        _validate_receipt(producer, path.name)
+        detach_attempted = True
+        _rename_exclusive(parent, path.name, detached_name)
+        producer.name = detached_name
+        # 검증 직전 successor가 이동됐어도 canonical을 덮어쓰지 않고 돌려놓는다.
+        _validate_receipt(producer, detached_name)
+        os.fsync(parent)
+        _validate_receipt(displaced, displaced_name)
+        validate_directory(path.parent, parent)
+        _rename_exclusive(parent, displaced_name, path.name)
+        displaced.name = path.name
+        restored = True
+        _validate_receipt(displaced, path.name)
+        os.fsync(parent)
+        validate_directory(path.parent, parent)
+    except BaseException as error:
+        if detach_attempted and not restored:
+            try:
+                # 분리 검증 실패도 포함한다. 배타 rename만 사용하여 successor를 보존한다.
+                _rename_exclusive(parent, detached_name, path.name)
+                producer.name = path.name
+                os.fsync(parent)
+            except BaseException:
+                pass
+        raise _replacement_recovery_error(
+            path, producer, displaced, (path.name, displaced_name, detached_name),
+            "private file replacement could not restore canonical namespace",
+        ) from error
+    # 복원이 durable해진 뒤에만 producer를 삭제한다.
+    try:
+        _retire_name(producer, detached_name)
+    except BaseException as error:
+        raise _replacement_recovery_error(
+            path, producer, displaced, (path.name, displaced_name, detached_name),
+            "private file replacement recovery cleanup failed",
+        ) from error
+    producer.close()
+    displaced.close()
+    raise NamespaceAuthorityError("private file replacement restored an untrusted canonical entry")
+
+
+def _replacement_recovery_error(
+    path: Path, producer: Receipt, displaced: Receipt | None,
+    names: tuple[str, ...], message: str,
+) -> NamespaceAuthorityError:
+    """보고 실패도 capability를 소실시키지 않는다. 이름은 관측 시점의 권한이다."""
+    parent = producer.directory_fd
+    receipts = tuple(r for r in (producer, displaced) if r is not None)
+    notes = []
+    try:
+        # Darwin F_GETPATH: 정식 부모가 교체돼도 FD가 보유한 실제 경로를 사용한다.
+        report_parent = Path(os.fsdecode(fcntl.fcntl(parent, 50, bytes(1024)).split(b"\0", 1)[0]))
+    except BaseException as error:
+        report_parent = path.parent
+        notes.append(f"retained paths use last known parent; resolve directory FD {parent}: {error}")
+    retained = []
+    authority = "unknown"
+    for name in names:
+        try:
+            entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except BaseException as error:
+            retained.append(report_parent / name)
+            notes.append(f"retained entry {name} is indeterminate: {error}")
+            continue
+        retained.append(report_parent / name)
+        for label, receipt in (("producer", producer), ("displaced", displaced)):
+            if receipt is None:
+                continue
+            try:
+                if _identity(entry) == receipt.identity:
+                    receipt.name = name
+                    if name == path.name:
+                        _validate_receipt(receipt, name)
+                        validate_directory(path.parent, parent)
+                        authority = label
+            except BaseException:
+                pass
+    result = NamespaceAuthorityError(message, retained_paths=tuple(retained),
+                                     receipts=receipts, canonical_authority=authority)
+    for note in notes:
+        result.add_note(note)
+    return result
+
+
 def atomic_publish(
     path: Path,
     content: bytes,
     *,
     expected_identity: Receipt | Identity | None = None,
     directory_fd: int | None = None,
+    before_publish: Callable[[], None] | None = None,
+    expected_content: bytes | None = None,
 ) -> Receipt:
     """배타적으로 publish하거나 receipt로 고정된 정식 inode를 CAS 방식으로 교체한다."""
     parent = os.dup(directory_fd) if directory_fd is not None else _open_parent(path)
@@ -512,39 +630,39 @@ def atomic_publish(
             elif not _same_directory(expected.directory_fd, parent):
                 raise RuntimeError("private file receipt belongs to a different directory")
             _validate_receipt(expected)
-            _swap_names(parent, staged_name, path.name)
+            if before_publish is not None:
+                before_publish()
+            if (expected_content is not None
+                    and os.pread(expected.file_fd, len(expected_content) + 1, 0) != expected_content):
+                raise RuntimeError("private file content changed before replacement")
+            swap_error = None
+            try:
+                _swap_names(parent, staged_name, path.name)
+            except BaseException as error:
+                # syscall 뒤의 wrapper/fsync 실패도 게시된 generation의 권한을
+                # 잃지 않는다. 외부 canonical이면 어떤 이름도 정리하지 않는다.
+                _validate_receipt(staged, path.name)
+                swap_error = error
             staged.name = path.name
             committed = True
             try:
                 _validate_receipt(expected, staged_name)
+                if (expected_content is not None
+                        and os.pread(expected.file_fd, len(expected_content) + 1, 0) != expected_content):
+                    raise RuntimeError("private file content changed during replacement")
             except BaseException:
-                try:
-                    _swap_names(parent, staged_name, path.name)
-                except OSError as error:
-                    # 정식 이름이 staged inode를 가리킨다는 것이 더 이상
-                    # 증명되지 않는다.  유효하지 않은 committed receipt를
-                    # 노출하지 말고, identity를 검사하는 finally 블록이
-                    # 모든 외부(foreign) 항목을 보존하도록 한다.
-                    committed = False
-                    expected.close()
-                    raise NamespaceAuthorityError(
-                        "private file replacement could not restore canonical namespace"
-                    ) from error
-                staged.name = staged_name
+                # 복구가 소유권을 인수한다. 일반 finally 정리는 canonical을 삭제하면 안 된다.
+                recovery_producer = staged
+                staged = None
                 committed = False
-                try:
-                    _validate_receipt(expected, path.name)
-                except BaseException as verification_error:
-                    expected.close()
-                    raise NamespaceAuthorityError(
-                        "private file replacement restored an untrusted canonical entry"
-                    ) from verification_error
-                raise RuntimeError("private file changed during atomic replacement; foreign successor preserved")
+                _recover_replacement(path, recovery_producer, staged_name)
             consumed_expected = expected
             _retire_name(expected, staged_name)
             expected.close()
             owned_expected = None
             consumed_expected = None
+            if swap_error is not None:
+                raise swap_error
 
         try:
             _validate_receipt(staged)

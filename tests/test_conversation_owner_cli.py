@@ -120,6 +120,48 @@ def test_directory_symlinks_rejected(setup, target):
     assert not (state / "runtime.json").exists()
 
 
+@pytest.mark.parametrize("user_id", [
+    "nas_user:00000000-0000-4000-8000-000000000001",
+    "a" + ":" + "b" * 189,
+])
+def test_namespaced_principal_exact_grant_and_receipt(setup, user_id):
+    _, _, _, state, args = setup
+    principal = "nous:" + user_id
+    args[args.index("--principal") + 1] = principal
+    result = run_cli(args)
+    assert result.returncode == 0, result.stderr
+    config = json.loads((state / "runtime.json").read_text())
+    assert config["principal_board_grants"] == {principal: ["test-board"]}
+    service = conversation_runtime._build(state / "runtime.json")
+    assert service is not None
+    assert service.authorizes_principal(principal, "test-board")
+    receipt = service.authority.issue_principal_scope(
+        principal=principal, board="test-board", task="task",
+        expires_at_ns=time.time_ns() + 60_000_000_000,
+    )
+    for alternate in ("nous:" + user_id.replace(":", ""),
+                      "nous:" + user_id.replace(":", "_"),
+                      "github:" + user_id):
+        assert not service.authorizes_principal(alternate, "test-board")
+        other = service.authority.issue_principal_scope(
+            principal=alternate, board="test-board", task="task",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+        )
+        assert receipt.principal_ref != other.principal_ref
+
+
+@pytest.mark.parametrize("principal", [
+    "nous:", "nous::user", "nous:nas_user:bad user", "nous:nas_user:bad\n",
+    "nous:nas_user:../user", "nous:nas_user:..\\user", "nous:nas_user:$(id)",
+    "nous:nas_user:user;id", "nous:nas_user:<script>", "nous:" + "a" * 192,
+])
+def test_unsafe_or_oversized_namespaced_principal_publishes_nothing(setup, principal):
+    _, _, _, state, args = setup
+    args[args.index("--principal") + 1] = principal
+    assert run_cli(args).returncode != 0
+    assert not state.exists()
+
+
 def test_two_explicit_roots_and_principals(setup):
     home, _, _, state, args = setup
     codex = home / "codex"

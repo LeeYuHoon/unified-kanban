@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import errno
 import fcntl
@@ -493,7 +494,7 @@ def baseline_token(path: Path | None) -> str:
     return "sha256:" + hashlib.sha256(_stable_regular_bytes(Path(path))).hexdigest()
 
 
-def launcher_payload(layout: ReleaseLayout, baseline: str) -> bytes:
+def legacy_launcher_payload(layout: ReleaseLayout, baseline: str) -> bytes:
     """일반 파일 릴리스 selector를 검증하는 관리되는 launcher를 렌더링한다."""
     if _BASELINE_RE.fullmatch(baseline) is None:
         raise ValueError("launcher baseline must be 'absent' or 'sha256:<64 hex>'")
@@ -594,7 +595,53 @@ os.execv(executable,[executable,*sys.argv[3:]])'''
     return f"#!/bin/sh\n{_BASELINE_MARKER} {baseline}\n{command}\n".encode("utf-8")
 
 
-def launcher_baseline(layout: ReleaseLayout, data: bytes) -> str:
+def launcher_payload(layout: ReleaseLayout, baseline: str) -> bytes:
+    """이 세대에는 저장소 위치가 고정되므로 이동한 뒤에는 설치를 다시 수행해야 한다."""
+    legacy = legacy_launcher_payload(layout, baseline).decode()
+    words = shlex.split(legacy.splitlines()[2] + "\n" + "\n".join(legacy.splitlines()[3:]))
+    code = words[4]
+    authority = str(Path(__file__).resolve())
+    # 생성 시 신뢰된 부트스트랩을 포함한다. Darwin 확장 ACL을 포함한
+    # 디스크립터 검사가 끝나기 전에는 권한 모듈을 가져오지 않는다.
+    import inspect
+    bootstrap = 'import contextlib\nfrom pathlib import Path\n' + '\n'.join(
+        inspect.getsource(fn) for fn in (
+            _tui_acl_text, _checked_tui_fd, _read_tui_bytes,
+            _validate_real_directory_ancestry,
+        )
+    )
+    start = code.index('def safe_directory_chain(path):')
+    end = code.index('try:\n safe_directory_chain(root)', start)
+    code = code[:start] + bootstrap + '\ndef safe_directory_chain(path):\n _validate_real_directory_ancestry(Path(path))\n' + code[end:]
+    code = code.replace('except (OSError,UnicodeError,ValueError):', 'except (OSError,UnicodeError,ValueError,RuntimeError):')
+    handoff = '''
+for key in list(os.environ):
+ if key.startswith(("DYLD_","LD_")) or key in ("NODE_OPTIONS","NODE_PATH","PYTHONPATH","PYTHONHOME"):
+  os.environ.pop(key,None)
+try:
+ from pathlib import Path
+ safe_directory_chain(os.path.dirname(AUTHORITY))
+ authority_bytes=_read_tui_bytes(Path(AUTHORITY))
+ producer={"__file__":AUTHORITY,"__name__":"<run_path>"}
+ exec(compile(authority_bytes,AUTHORITY,"exec"),producer)
+ os.environ.update(producer["managed_tui_environment"](Path(release)))
+except Exception as exc:
+ print("invalid completed Hermes TUI release: "+str(exc),file=sys.stderr)
+ raise SystemExit(126)
+'''.replace('AUTHORITY', repr(authority))
+    code = code.replace('os.environ.pop("PYTHONPATH",None)', handoff + '\nos.environ.pop("PYTHONPATH",None)')
+    command = " ".join(("exec /usr/bin/python3 -I -B -c", shlex.quote(code), shlex.quote(str(layout.selector)), shlex.quote(str(layout.root)), '"$@"'))
+    # 첫 Python exec 전에는 Bash 내장 명령만 사용한다. macOS는 보호된 셸에
+    # 진입할 때 DYLD_*를 지울 수 있으므로 셸 시작 전까지 통제한다고 보장하지 않는다.
+    sanitize = '''for _hermes_key in ${!LD_@} ${!DYLD_@} ${!NODE_@} ${!PYTHON@}; do
+ unset "$_hermes_key" || exit 126
+done
+unset _hermes_key
+'''
+    return f"#!/bin/bash\n{_BASELINE_MARKER} {baseline}\n{sanitize}{command}\n".encode()
+
+
+def launcher_baseline(layout: ReleaseLayout, data: bytes, *, accept_legacy: bool = False) -> str:
     """정확히 관리되는 launcher의 바인딩을 반환하고, 그렇지 않으면 예외를 던진다.
 
     자신이 어떤 launcher를 밀어냈는지는 생산자만이 말할 수 있으므로, 바인딩은
@@ -611,7 +658,7 @@ def launcher_baseline(layout: ReleaseLayout, data: bytes) -> str:
         raise ForeignLauncher("launcher baseline binding is not UTF-8") from exc
     if _BASELINE_RE.fullmatch(token) is None:
         raise ForeignLauncher("launcher baseline binding is malformed")
-    if launcher_payload(layout, token) != data:
+    if launcher_payload(layout, token) != data and not (accept_legacy and legacy_launcher_payload(layout, token) == data):
         raise ForeignLauncher("launcher is not the managed launcher for this checkout")
     return token
 
@@ -699,7 +746,12 @@ def sync_release_dependencies(
         # 프로덕션 게이트웨이는 어떤 대화형 프로세스가 존재하기도 전에 Telegram을
         # 활성화할 수 있다. 게이트웨이 시작이 불변 venv에 그것을 써 넣는 일이 결코
         # 없도록, 봉인 전에 lockfile로 고정된 메시징 집합을 실체화한다.
-        run("sync", "--extra", "all", "--extra", "messaging", "--locked")
+        # all은 선별된 extra다. 시작 시 조회되는 Bedrock·로컬 STT도 봉인 전에
+        # 기존 lock에서 설치한다. 모든 선택 기능의 지원을 뜻하지는 않는다.
+        run(
+            "sync", "--extra", "all", "--extra", "messaging",
+            "--extra", "bedrock", "--extra", "voice", "--locked",
+        )
     launcher = venv / "bin" / "hermes"
     if not launcher.is_file() or launcher.is_symlink() or not os.access(launcher, os.X_OK):
         raise RuntimeError("locked dependency sync did not create an executable Hermes launcher")
@@ -799,6 +851,244 @@ def build_release_web_ui(
     if (current_release.st_dev, current_release.st_ino) != release_identity:
         raise RuntimeError("release identity changed during web construction")
     return output
+
+def _tui_acl_text(fd: int) -> str:
+    """모드와 내용을 검사하는 동일한 FD에서 Darwin ACL을 읽는다.
+
+    보수적으로 거부 전용 ACE만 허용하고 모든 허용 ACE는 거절한다.
+    Linux POSIX 접근 ACL의 허용 범위는 검사한 그룹 모드 마스크로 제한된다.
+    """
+    if sys.platform != "darwin":
+        if not sys.platform.startswith("linux"):
+            raise PermissionError("unsupported ACL platform")
+        return ""
+    import ctypes
+    import errno
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+    libc.acl_get_fd_np.restype = ctypes.c_void_p
+    libc.acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)]
+    libc.acl_to_text.restype = ctypes.c_void_p
+    libc.acl_free.argtypes = [ctypes.c_void_p]
+    libc.acl_free.restype = ctypes.c_int
+    acl = libc.acl_get_fd_np(fd, 0x100)
+    if not acl:
+        error = ctypes.get_errno()
+        if error == errno.ENOENT:
+            return ""
+        raise OSError(error, os.strerror(error))
+    text = None
+    try:
+        length = ctypes.c_ssize_t()
+        text = libc.acl_to_text(acl, ctypes.byref(length))
+        if not text:
+            raise PermissionError("ACL unreadable")
+        return ctypes.string_at(text, length.value).decode("utf-8", errors="strict")
+    finally:
+        if text:
+            libc.acl_free(text)
+        libc.acl_free(acl)
+
+
+@contextlib.contextmanager
+def _checked_tui_fd(path: Path, directory: bool = False, private: bool = False, root_owner: bool = False):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    if directory:
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        kind = stat.S_ISDIR if directory else stat.S_ISREG
+        if (not kind(info.st_mode) or info.st_uid not in ({0, os.getuid()} if root_owner else {os.getuid()})
+                or info.st_mode & 0o022 or (not directory and info.st_nlink != 1)
+                or (private and stat.S_IMODE(info.st_mode) != 0o600)):
+            raise RuntimeError("TUI runtime ownership, type or mode mismatch")
+        for ace in _tui_acl_text(fd).splitlines():
+            ace = ace.strip()
+            if ace and ace != '!#acl 1' and (':deny:' not in ace or ':allow:' in ace):
+                raise RuntimeError("TUI ACL is forbidden or unreadable")
+        yield fd
+        after = os.fstat(fd)
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise RuntimeError("TUI object changed during validation")
+    except BaseException as primary:
+        # close가 실패해도 디스크립터가 이미 해제됐을 수 있으므로 재시도하지 않는다.
+        # yield 이전 실패도 포함하여 현재 예외와 역추적을 보존한다.
+        try:
+            os.close(fd)
+        except BaseException as cleanup:
+            note = f"TUI descriptor close failed: {cleanup}"
+            if hasattr(primary, "add_note"):
+                primary.add_note(note)
+            else:
+                # 실행기 부트스트랩은 macOS 시스템 Python 3.9에서도 실행된다.
+                primary.__notes__ = [*getattr(primary, "__notes__", ()), note]
+        raise
+    else:
+        # 본문 성공 후 close 실패는 부가 진단이 아니라 주된 실패다.
+        os.close(fd)
+
+
+def _read_tui_bytes(path: Path, limit: int = -1, private: bool = False):
+    with _checked_tui_fd(path, private=private) as fd, os.fdopen(fd, 'rb', closefd=False) as stream:
+        data = stream.read(limit + 1 if limit >= 0 else -1)
+        if limit >= 0 and len(data) > limit:
+            raise ValueError("TUI receipt too large")
+        return data
+
+
+def _strict_tui_json(data: bytes) -> dict:
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate receipt key")
+            result[key] = value
+        return result
+    if len(data) > 1024 * 1024:
+        raise ValueError("TUI receipt too large")
+    text = data.decode('utf-8')
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in '{[':
+            depth += 1
+            if depth > 2:
+                raise ValueError("TUI receipt nesting too deep")
+        elif char in '}]':
+            depth -= 1
+    def reject_constant(value):
+        raise ValueError("nonstandard JSON constant")
+    record = json.loads(text, object_pairs_hook=pairs, parse_constant=reject_constant)
+    if not isinstance(record, dict) or type(record.get("schema")) is not int:
+        raise ValueError("invalid TUI schema type")
+    return record
+
+
+def _tui_walk_error(error):
+    raise RuntimeError("TUI closure traversal failed") from error
+
+
+def _tui_closure_inventory(release: Path) -> dict[str, str]:
+    """실행 폐쇄의 모든 파일을 링크 없이 검증한다."""
+    root = release / "tui-runtime"
+    files = {}
+    with _checked_tui_fd(release, directory=True), _checked_tui_fd(root, directory=True):
+        pass
+    for directory, names, leaves in os.walk(root, followlinks=False, onerror=_tui_walk_error):
+        for path in [Path(directory), *(Path(directory) / name for name in names)]:
+            with _checked_tui_fd(path, directory=True):
+                pass
+        for name in leaves:
+            path = Path(directory) / name
+            files[path.relative_to(release).as_posix()] = hashlib.sha256(_read_tui_bytes(path)).hexdigest()
+    return files
+
+
+def verify_release_tui(release: Path) -> dict[str, object]:
+    """봉인 영수증 계산용 검증이며 런타임 신뢰 앵커를 대신하지 않는다."""
+    try:
+        receipt = release / ".hermes-tui-runtime.json"
+        record = _strict_tui_json(_read_tui_bytes(receipt, 1024 * 1024, private=True))
+        expected = {"schema": 1, "kind": "unified-kanban-prebuilt-tui", "node": "tui-runtime/node", "entry": "tui-runtime/app/entry.js", "cwd": "tui-runtime/app", "files": _tui_closure_inventory(release)}
+        required = {"tui-runtime/node", "tui-runtime/app/entry.js", "tui-runtime/app/package.json"}
+        if record != expected or not required.issubset(expected["files"]):
+            raise RuntimeError("TUI runtime receipt mismatch")
+        if not os.access(release / "tui-runtime/node", os.X_OK):
+            raise RuntimeError("TUI Node is not executable")
+        return record
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("TUI runtime receipt or closure is missing or invalid") from exc
+
+
+def verify_node_loader_closure(node: Path, env: dict[str, str]) -> None:
+    """Darwin 실행 의존성에는 Apple 봉인 시스템 라이브러리 경로만 허용한다."""
+    if sys.platform != "darwin":
+        return
+    result = subprocess.run(["/usr/bin/otool", "-L", str(node)], env=env,
+                            capture_output=True, text=True, check=True, timeout=15)
+    dependencies = result.stdout.splitlines()[1:]
+    if not dependencies:
+        raise RuntimeError("Node has no verifiable system dylib closure")
+    for line in dependencies:
+        name = line.strip().split(" (", 1)[0]
+        if os.path.normpath(name) != name or not name.startswith(("/usr/lib/", "/System/Library/Frameworks/", "/System/Library/PrivateFrameworks/")):
+            raise RuntimeError("Node requires a non-system dylib: " + name)
+
+
+def build_release_tui(release: Path, *, npm: str | Path, node: str | Path,
+                      base_env: dict[str, str] | None = None) -> Path:
+    """고정 workspace를 빌드하고 독립 실행 폐쇄를 영수증에 결속한다."""
+    release, npm, node = Path(release), Path(npm), Path(node)
+    if not release.is_absolute() or not re.fullmatch(r"release-[0-9a-f]{40}", release.name) or release.is_symlink():
+        raise RuntimeError("TUI build requires a stable release directory")
+    for executable in (npm, node):
+        if not executable.is_absolute():
+            raise RuntimeError("TUI build requires absolute tool paths")
+        target = executable.resolve(strict=True)
+        info = target.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022 or not os.access(target, os.X_OK):
+            raise RuntimeError("TUI build tool is not owner-controlled")
+    tools = (npm, npm.resolve(strict=True), node, node.resolve(strict=True))
+    def signature(path):
+        info = path.lstat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    tool_identities = {path: signature(path) for path in tools}
+    root_identity = signature(release)[:4]
+    def check_identities():
+        if signature(release)[:4] != root_identity or any(signature(path) != identity for path, identity in tool_identities.items()):
+            raise RuntimeError("TUI build tool/root identity changed")
+    def run(arguments, **kwargs):
+        check_identities()
+        result = subprocess.run(arguments, **kwargs)
+        check_identities()
+        return result
+    for name in ("package.json", "package-lock.json", "ui-tui/package.json", "ui-tui/scripts/build.mjs"):
+        _stable_regular_bytes(release / name)
+    ambient = os.environ if base_env is None else base_env
+    env = {key: ambient[key] for key in ("HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR") if key in ambient}
+    env.update(PATH=f"{node.parent}:{npm.parent}:/usr/bin:/bin:/usr/sbin:/sbin", NPM_CONFIG_FUND="false", NPM_CONFIG_AUDIT="false")
+    check_identities()
+    verify_node_loader_closure(node.resolve(strict=True), env)
+    check_identities()
+    version = run([str(node), "--version"], env=env, capture_output=True, text=True, check=True, timeout=15).stdout.strip()
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", version)
+    if not match or not ((int(match[1]) == 22 and int(match[2]) >= 22) or (int(match[1]) == 24 and int(match[2]) >= 11) or int(match[1]) >= 26):
+        raise RuntimeError("TUI Node is outside the pinned compatible engine range")
+    for args in (("ci", "--workspace", "ui-tui"), ("run", "build", "--workspace", "ui-tui")):
+        result = run([str(npm), *args], cwd=release, env=env, capture_output=True, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError(f"TUI npm build failed: {result.stderr[-2000:]}")
+    check_identities()
+    runtime = release / "tui-runtime"
+    runtime.mkdir(mode=0o700)
+    app = runtime / "app"
+    app.mkdir(mode=0o700)
+    _write_private_candidate(runtime / "node", _stable_regular_bytes(node.resolve(strict=True)), 0o700)
+    _write_private_candidate(app / "entry.js", _stable_regular_bytes(release / "ui-tui/dist/entry.js"), 0o600)
+    _write_private_candidate(app / "package.json", b'{"type":"module"}\n', 0o600)
+    # esbuild의 고정 빌드는 모든 JS 의존성을 번들에 넣는다. 실행 시 npm은 없다.
+    for path in (release / "node_modules", release / "ui-tui/node_modules"):
+        if path.exists() or path.is_symlink():
+            if not path.is_dir() or path.is_symlink():
+                raise RuntimeError("TUI npm staging is not a real directory")
+            shutil.rmtree(path)
+    record = {"schema": 1, "kind": "unified-kanban-prebuilt-tui", "node": "tui-runtime/node", "entry": "tui-runtime/app/entry.js", "cwd": "tui-runtime/app", "files": _tui_closure_inventory(release)}
+    receipt = release / ".hermes-tui-runtime.json"
+    _write_private_candidate(receipt, json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n", 0o600)
+    check_identities()
+    verify_release_tui(release)
+    return receipt
+
 
 _BYTECODE_VALIDATOR = r"""
 import hashlib, importlib.util, json, marshal, os, stat, sys, types
@@ -1462,6 +1752,8 @@ def _validate_real_directory_ancestry(path: Path) -> None:
         raise RuntimeError(f"release root ancestor is not a directory: {current}")
     if anchor_info.st_uid not in {0, os.getuid()} or stat.S_IMODE(anchor_info.st_mode) & 0o022:
         raise RuntimeError(f"release root has an untrusted writable ancestor: {current}")
+    with _checked_tui_fd(current, directory=True, root_owner=True):
+        pass
     for component in path.parts[1:]:
         current /= component
         info = os.lstat(current)
@@ -1471,6 +1763,8 @@ def _validate_real_directory_ancestry(path: Path) -> None:
             raise RuntimeError(f"release root ancestor is not a directory: {current}")
         if info.st_uid not in {0, os.getuid()} or stat.S_IMODE(info.st_mode) & 0o022:
             raise RuntimeError(f"release root has an untrusted writable ancestor: {current}")
+        with _checked_tui_fd(current, directory=True, root_owner=True):
+            pass
 
 
 def plan_release_gc(
@@ -3162,6 +3456,10 @@ def prepare_release(
         if npm is None:
             raise RuntimeError("immutable release web construction requires npm")
         build_release_web_ui(layout.release, npm=npm)
+    if (layout.release / "ui-tui/package.json").is_file():
+        if npm is None:
+            raise RuntimeError("immutable release TUI construction requires npm")
+        build_release_tui(layout.release, npm=npm, node=Path(npm).parent / "node")
     _precompile_release_bytecode(layout.release)
     _publish_bytecode_fingerprint(layout.release, carried)
     _publish_completion_receipt(layout, upstream, carried)
@@ -3276,7 +3574,14 @@ def _completion_payload(layout: ReleaseLayout, upstream: str, carried: str) -> d
     # 정규화된 그룹은 이 release 자체의 tree에서 다시 유도하고 자체 byte를 기준으로
     # 다시 입증하므로, receipt는 나머지 inventory만큼 엄격하게 정규화 결정도 결속한다.
     collisions = case_collisions(layout.release, "HEAD")
+    tui_binding = {}
+    if (layout.release / "ui-tui/package.json").is_file():
+        verify_release_tui(layout.release)
+        tui_binding["tui_receipt_sha256"] = hashlib.sha256(
+            _stable_regular_bytes(layout.release / ".hermes-tui-runtime.json")
+        ).hexdigest()
     return {
+        **tui_binding,
         "version": 2,
         "release_identity": [identity.st_dev, identity.st_ino],
         "upstream": upstream,
@@ -3364,6 +3669,185 @@ def _verify_completed_release(layout: ReleaseLayout, upstream: str, carried: str
         raise RuntimeError("existing release completion receipt does not match content")
 
 
+def managed_tui_environment(release: Path) -> dict[str, str]:
+    """완료된 릴리스의 권한만 관리형 네이티브 인계 정보를 발급할 수 있다.
+
+    유지보수 도구는 이전 영수증을 읽을 수 있지만 이 세대를 실행할 수는 없다.
+    이전하기 전에 검토된 릴리스에서 명시적으로 다시 빌드해야 한다.
+    이전 영수증을 승격하거나 TUI 영수증만으로 권한을 도출하지 않는다.
+    """
+    release = Path(release)
+    _validate_real_directory_ancestry(release)
+    if not release.is_absolute() or release != release.resolve() or re.fullmatch(r"release-[0-9a-f]{40}", release.name) is None:
+        raise RuntimeError("managed TUI requires a canonical release")
+    receipt = release / _COMPLETION_RECEIPT
+    info = receipt.lstat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise RuntimeError("completion authority is not private")
+    data = _stable_regular_bytes(receipt)
+    record = json.loads(data)
+    if not isinstance(record, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("tui_receipt_sha256", ""))):
+        raise RuntimeError("legacy completion has no TUI authority; reviewed rebuild required")
+    upstream = _sha(record.get("upstream", ""), "upstream")
+    carried = _sha(record.get("carried", ""), "carried")
+    if release.name != "release-" + carried:
+        raise RuntimeError("completion release identity mismatch")
+    layout = ReleaseLayout(release.parent, release, release.parent / "current")
+    _verify_completed_release(layout, upstream, carried)
+    if _stable_regular_bytes(receipt) != data:
+        raise RuntimeError("completion authority changed during verification")
+    return {
+        "HERMES_UNIFIED_KANBAN_TUI": "prebuilt-v1",
+        "HERMES_UNIFIED_KANBAN_RELEASE": str(release),
+        "HERMES_UNIFIED_KANBAN_TUI_RECEIPT_SHA256": record["tui_receipt_sha256"],
+    }
+
+
+def reattest_release_device(
+    agent_repo: Path, upstream: str, carried: str, *,
+    expected_receipt_sha256: str, apply: bool = False,
+) -> dict[str, object]:
+    """검토자가 승인한 receipt의 device 값만 재증명한다. setup에서는 호출하지 않는다."""
+    from kanban_adapter import private_files as private
+
+    if re.fullmatch(r"[0-9a-f]{64}", expected_receipt_sha256) is None:
+        raise ValueError("expected receipt must be an exact lowercase SHA256")
+    layout = release_layout(agent_repo, upstream, carried)
+    receipt_path = layout.release / _COMPLETION_RECEIPT
+    root_fd = private.open_directory(layout.root)
+    release_fd = -1
+    receipt = None
+    selector = None
+    try:
+        selector_fd = os.open(layout.selector.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                              dir_fd=root_fd)
+        selector = private.Receipt(os.dup(root_fd), selector_fd, layout.selector.name)
+        private._validate_receipt(selector)
+        selector_data = selector_payload(layout)
+        if os.pread(selector_fd, len(selector_data) + 1, 0) != selector_data:
+            raise RuntimeError("reviewed release is not selected")
+        release_fd = os.open(layout.release.name, private._directory_flags(), dir_fd=root_fd)
+        for fd in (root_fd, release_fd):
+            info = os.fstat(fd)
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise RuntimeError("re-attestation requires owner-only release directories")
+        fd = os.open(receipt_path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=release_fd)
+        receipt = private.Receipt(os.dup(release_fd), fd, receipt_path.name)
+        initial = private._validate_receipt(receipt)
+        if initial.st_uid != os.getuid() or stat.S_IMODE(initial.st_mode) != 0o600:
+            raise RuntimeError("completion receipt is not private")
+        if initial.st_size > 1024 * 1024:
+            raise RuntimeError("completion receipt is too large")
+        old = os.pread(fd, initial.st_size + 1, 0)
+        if hashlib.sha256(old).hexdigest() != expected_receipt_sha256:
+            raise RuntimeError("expected old receipt SHA256 mismatch")
+        observed = json.loads(old)
+        identity = observed.get("release_identity") if isinstance(observed, dict) else None
+        if (not isinstance(identity, list) or len(identity) != 2
+                or any(type(value) is not int or value < 0 for value in identity)):
+            raise RuntimeError("invalid completion release identity")
+
+        def validate_paths() -> None:
+            private.validate_directory(layout.root, root_fd)
+            private.validate_directory(layout.release, release_fd)
+            private._validate_receipt(selector)
+            if os.pread(selector.file_fd, len(selector_data) + 1, 0) != selector_data:
+                raise RuntimeError("selected release changed during verification")
+            for directory_fd in (root_fd, release_fd):
+                info = os.fstat(directory_fd)
+                if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise RuntimeError("release directory privacy changed")
+
+        def validate_old() -> None:
+            validate_paths()
+            current = private._validate_receipt(receipt)
+            # inode뿐 아니라 같은 inode에 대한 내용/메타데이터 변경도 거부한다.
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                      "st_size", "st_mtime_ns", "st_ctime_ns")
+            if (any(getattr(initial, key) != getattr(current, key) for key in fields)
+                    or os.pread(fd, initial.st_size + 1, 0) != old):
+                raise RuntimeError("completion receipt changed during verification")
+
+        validate_old()
+        if _run_git(layout.release, "rev-parse", "HEAD") != carried:
+            raise RuntimeError("release has the wrong reviewed carried HEAD")
+        _run_git(layout.release, "merge-base", "--is-ancestor", upstream, carried)
+        _verify_bytecode_fingerprint(layout.release, carried)
+        expected = _completion_payload(layout, upstream, carried)
+        validate_old()
+        normalized = dict(observed)
+        normalized["release_identity"] = [expected["release_identity"][0], identity[1]]
+        # JSON 정규형 비교는 bool/int의 Python 동등성까지 허용하지 않는다.
+        if json.dumps(normalized, sort_keys=True) != json.dumps(expected, sort_keys=True):
+            raise RuntimeError("only release st_dev drift is eligible for re-attestation")
+        result = {"status": "dry-run", "changed": False,
+                  "old_receipt_sha256": expected_receipt_sha256,
+                  "old_release_identity": identity,
+                  "release_identity": expected["release_identity"]}
+        if not apply:
+            return result
+        from kanban_adapter.compatibility import check_selected_release
+
+        def final_verification() -> None:
+            validate_paths()
+            _verify_completed_release(layout, upstream, carried)
+            reason = check_selected_release(agent_repo, upstream, carried)
+            if reason:
+                raise RuntimeError(reason)
+            validate_paths()
+
+        if identity == expected["release_identity"]:
+            final_verification()
+            validate_old()
+            return {**result, "status": "already-current"}
+        data = (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        validate_old()
+        installed = None
+        try:
+            installed = private.atomic_publish(
+                receipt_path, data, expected_identity=receipt, directory_fd=release_fd,
+                before_publish=validate_old, expected_content=old,
+            )
+            final_verification()
+            private._validate_receipt(installed)
+            if os.pread(installed.file_fd, len(data) + 1, 0) != data:
+                raise RuntimeError("published completion receipt content changed")
+        except BaseException as error:
+            if isinstance(error, private.CommittedPublicationError):
+                installed = error.receipt
+            if installed is not None:
+                # 원본 inode는 primitive가 퇴역시켰으므로 byte를 새 generation으로
+                # 복원한다. CAS 권한이 사라졌으면 외부 successor를 절대 덮어쓰지 않는다.
+                try:
+                    restored = private.atomic_publish(
+                        receipt_path, old, expected_identity=installed, directory_fd=release_fd,
+                        expected_content=data,
+                    )
+                    restored.close()
+                except BaseException as recovery_error:
+                    if isinstance(recovery_error, private.NamespaceAuthorityError):
+                        # 보존된 복구 capability와 경로를 호출자에게 그대로 전달한다.
+                        raise recovery_error from error
+                    if isinstance(recovery_error, private.CommittedPublicationError):
+                        recovery_error.receipt.close()
+                    error.add_note(f"receipt compensation failed: {recovery_error}")
+            raise
+        finally:
+            if installed is not None:
+                installed.close()
+        return {**result, "status": "applied", "changed": True,
+                "receipt_sha256": hashlib.sha256(data).hexdigest()}
+    finally:
+        if selector is not None:
+            selector.close()
+        if receipt is not None:
+            receipt.close()
+        if release_fd >= 0:
+            os.close(release_fd)
+        os.close(root_fd)
+
+
 def _add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     baseline = parser.add_mutually_exclusive_group(required=True)
     baseline.add_argument("--baseline-file", type=Path)
@@ -3396,6 +3880,12 @@ def _emit_gc_partial_result(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
+    reattest = subparsers.add_parser("reattest-device", help="유지관리자 전용 device 재증명 (기본: 읽기 전용)")
+    reattest.add_argument("agent_repo", type=Path)
+    reattest.add_argument("--reviewed-upstream", required=True)
+    reattest.add_argument("--reviewed-carried", required=True)
+    reattest.add_argument("--expected-receipt-sha256", required=True)
+    reattest.add_argument("--apply", action="store_true")
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("agent_repo", type=Path)
     prepare.add_argument("upstream")
@@ -3439,7 +3929,14 @@ def main() -> int:
     baseline.add_argument("upstream")
     baseline.add_argument("carried")
     baseline.add_argument("launcher", type=Path)
+    baseline.add_argument("--accept-legacy", action="store_true")
     args = parser.parse_args()
+    if args.action == "reattest-device":
+        print(json.dumps(reattest_release_device(
+            args.agent_repo, args.reviewed_upstream, args.reviewed_carried,
+            expected_receipt_sha256=args.expected_receipt_sha256, apply=args.apply,
+        ), sort_keys=True))
+        return 0
     if args.action == "gc":
         root = release_root(args.agent_repo)
         launchd_plist = args.launchd_plist or (
@@ -3573,7 +4070,7 @@ def main() -> int:
         # 종료 코드 3은 "우리 launcher가 아님이 입증됨"을 뜻한다. 그 밖의 0이 아닌
         # 값은 내부 결함이므로, 호출자가 충돌을 판정 결과로 해석할 필요가 없다.
         try:
-            token = launcher_baseline(layout, _stable_regular_bytes(args.launcher))
+            token = launcher_baseline(layout, _stable_regular_bytes(args.launcher), accept_legacy=args.accept_legacy)
         except ForeignLauncher as exc:
             print(f"foreign Hermes launcher: {exc}", file=sys.stderr)
             return 3

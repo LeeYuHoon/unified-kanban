@@ -34,6 +34,8 @@ from .conversation import (
     SourceLocator,
     SourceReadLimiter,
     TrustedObservationBindingV1,
+    CODEX_TARGET_TURN_SCHEMA_PIN,
+    validate_codex_target_turn,
     normalize_timestamp,
     opaque_event_id,
     opaque_replay_id,
@@ -361,6 +363,15 @@ class CodexProjector:
             self._validate_message(record, payload)
             role = payload.get("role")
             public_user = role == "user" and payload.get("phase") is None
+            # rust-v0.154.0의 context/world_state/environment.rs는 주입된 환경 조각을
+            # role=user로 내보내지만 별도의 네이티브 종류로 구분한다.
+            # 혼합 조각을 포함한 메시지 전체를 제외하며 text/XML로 판별하지 않는다.
+            # 실제 user.text 요청에도 같은 봉투 형식이 포함될 수 있기 때문이다.
+            metadata = payload.get(self._native_metadata_field)
+            if public_user and metadata is not None and (
+                "environments.environment_context" in metadata["content_item_kinds"]
+            ):
+                return ProjectOutcome(dropped_count=1)
             if not public_user and not (role == "assistant" and payload.get("phase") == "final_answer"):
                 return ProjectOutcome(dropped_count=1)
             content = payload.get("content")
@@ -423,6 +434,43 @@ class CodexProjector:
                 )
             )
         return ProjectOutcome(dropped_count=1)
+
+
+class CodexTargetTurnProjector(CodexProjector):
+    """인증된 네이티브 목표 ID의 공개 response_item만 투영한다.
+
+    호출자는 project_page의 binding/grant 검증을 통과해야 한다. 이 필터나
+    parser 준비 상태만으로 생산자 권한 또는 원본 경계를 만들지 않는다.
+    """
+
+    schema_pin = CODEX_TARGET_TURN_SCHEMA_PIN
+
+    capabilities = MappingProxyType({
+        **CodexProjector.capabilities,
+        "tool_call": "unsupported", "tool_result": "unsupported",
+    })
+
+    def project(
+        self,
+        record: Mapping[str, Any],
+        *,
+        binding: TrustedObservationBindingV1,
+        source_event_id: str,
+        seq: int,
+    ) -> ProjectOutcome:
+        validate_codex_target_turn(binding.provider, binding.schema_pin, binding.codex_target_turn_id)
+        if binding.schema_pin != self.schema_pin:
+            raise PermissionError("Codex target projector requires dedicated binding")
+        record = _strict_mapping(record)
+        if record.get("type") != "response_item":
+            return ProjectOutcome(dropped_count=1)
+        payload = _strict_mapping(record.get("payload"))
+        if payload.get("type") != "message":
+            return ProjectOutcome(dropped_count=1)
+        metadata = payload.get(self._native_metadata_field)
+        if not isinstance(metadata, Mapping) or metadata.get("turn_id") != binding.codex_target_turn_id:
+            return ProjectOutcome(dropped_count=1)
+        return super().project(record, binding=binding, source_event_id=source_event_id, seq=seq)
 
 
 class ClaudeProjector:

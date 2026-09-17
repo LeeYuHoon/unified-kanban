@@ -7,6 +7,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def clear_hermes_auxiliary_process_context() -> None:
+    """공유 환경 초기화를 대체하여 설치기 자식도 실행 보호 표시를 상속한다."""
+
 
 REPO = Path(__file__).resolve().parents[1]
 SUPPORTED_SHA = (REPO / "patches/hermes-agent-supported-upstream").read_text(
@@ -64,6 +71,12 @@ def environment(tmp_path: Path) -> dict[str, str]:
     fixture_root = tmp_path / "unified-kanban"
     for name in ("bin", "scripts", "patches", "src", "integrations"):
         shutil.copytree(REPO / name, fixture_root / name, dirs_exist_ok=True)
+    from test_setup import RELEASE_RECEIPT_HELPER
+
+    # 공통 완료 레시피는 실제 Git 객체와 바이트코드 및 TUI 검증을 사용한다.
+    shutil.copyfile(REPO / "tests/fixtures/setup-carried-objects.b64", fixture_root / "setup-carried-objects.b64")
+    receipt_helper = tmp_path / "publish-fake-release-receipt.py"
+    receipt_helper.write_text(RELEASE_RECEIPT_HELPER, encoding="utf-8")
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     (fake_bin / "hermes").write_text(FAKE_HERMES, encoding="utf-8")
@@ -92,9 +105,17 @@ def environment(tmp_path: Path) -> dict[str, str]:
         "    exit 1\n"
         "  fi\n"
         "  release=\"$3.releases/release-$5\"\n"
+        "  if [[ -f \"$release/.unified-kanban-release.json\" ]]; then\n"
+        f"    PATH=/usr/bin:/bin {shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(receipt_helper))} \"$1\" \"$3\" \"$4\" \"$5\" || exit 1\n"
+        "    printf '%s\\n' \"$release\"; exit 0\n"
+        "  fi\n"
         "  mkdir -p \"$release/venv/bin\"\n"
         "  cp \"$FAKE_HERMES_EXECUTABLE\" \"$release/venv/bin/hermes\"\n"
         "  chmod +x \"$release/venv/bin/hermes\"\n"
+        "  chmod 0700 \"$3.releases\"\n"
+        f"  PATH=/usr/bin:/bin {shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(receipt_helper))} \"$1\" \"$3\" \"$4\" \"$5\" || exit 1\n"
         "  printf '%s\\n' \"$release\"\n"
         "  exit 0\n"
         "fi\n"
@@ -111,7 +132,9 @@ def environment(tmp_path: Path) -> dict[str, str]:
     )
     python.chmod(0o755)
     parent_environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("HERMES_")
+        key: value for key, value in os.environ.items()
+        if not key.startswith("HERMES_")
+        or key in ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK")
     }
     return {
         **parent_environment,
@@ -140,6 +163,22 @@ def run(script: Path, env: dict[str, str], *args: str) -> subprocess.CompletedPr
         ["bash", str(actual_script), "--no-restart", *args], env=process_env, cwd=REPO,
         text=True, capture_output=True, check=False,
     )
+
+
+def test_fixture_preserves_inherited_safety_guards(tmp_path: Path) -> None:
+    env = environment(tmp_path)
+    guards = ("HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_KANBAN_TASK")
+    for guard in guards:
+        assert env.get(guard) == os.environ.get(guard)
+    result = subprocess.run(
+        [sys.executable, "-c", "import os, sys; "
+         "assert all(os.environ.get(k) == v for k, v in "
+         "zip(sys.argv[1::2], sys.argv[2::2]))",
+         *[item for guard in guards if guard in os.environ
+           for item in (guard, os.environ[guard])]],
+        env=env, text=True, capture_output=True, timeout=5, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_fixture_npm_is_preflight_only(tmp_path: Path) -> None:

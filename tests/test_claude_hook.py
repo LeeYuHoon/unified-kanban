@@ -18,6 +18,11 @@ from kanban_adapter.cli import main as cli_main
 from kanban_adapter.usage import concise_summary, usage_event_id
 
 
+@pytest.fixture(autouse=True)
+def isolated_board(monkeypatch):
+    monkeypatch.setattr(HermesCliBackend, "resolve_board", lambda self, **kwargs: "test-board")
+
+
 @dataclass
 class FakeAdapter:
     calls: list[tuple[list[str], Path]] = field(default_factory=list)
@@ -29,9 +34,9 @@ class FakeAdapter:
         if argv[0] == "start" and "--title-file" in argv:
             path = Path(argv[argv.index("--title-file") + 1])
             self.title_contents.append(path.read_text(encoding="utf-8"))
-        if argv[0] == "done" and argv[3].startswith("--result-file="):
-            result = Path(argv[3].split("=", 1)[1]).read_text(encoding="utf-8")
-            argv = [*argv[:3], f"--result={result}", f"--summary={concise_summary(result)}"]
+        if argv[0] == "done" and argv[5].startswith("--result-file="):
+            result = Path(argv[5].split("=", 1)[1]).read_text(encoding="utf-8")
+            argv = [*argv[:5], f"--result={result}", f"--summary={concise_summary(result)}"]
         self.calls.append((argv, cwd))
         if argv[0] == "start":
             return "t_12345678\n"
@@ -66,8 +71,10 @@ def test_prompt_creates_card_and_stop_completes_it(tmp_path: Path) -> None:
     state_files = list(cache.glob("*.json"))
     assert len(state_files) == 1
     state = json.loads(state_files[0].read_text(encoding="utf-8"))
-    assert state == {"cwd": str(project.resolve()), "task_id": "t_12345678"}
-    assert adapter.calls[0][0][:2] == ["start", "--title-file"]
+    assert state["cwd"] == str(project.resolve())
+    assert state["task_id"] == "t_12345678"
+    assert state["lifecycle"]["session"] == prompt["session_id"]
+    assert adapter.calls[0][0][:4] == ["start", "--board", "test-board", "--title-file"]
     assert "테스트 인사. 안녕하세요로 답변해줘" not in adapter.calls[0][0]
     assert adapter.title_contents == ["테스트 인사. 안녕하세요로 답변해줘"]
     assert adapter.calls[0][1] == project.resolve()
@@ -81,7 +88,7 @@ def test_prompt_creates_card_and_stop_completes_it(tmp_path: Path) -> None:
 
     assert adapter.calls[-1] == (
         [
-            "done", "--task", "t_12345678",
+            "done", "--board", "test-board", "--task", "t_12345678",
             "--result=안녕하세요! 👋", "--summary=안녕하세요! 👋",
         ],
         project.resolve(),
@@ -134,8 +141,8 @@ def test_result_content_never_travels_in_process_argv(tmp_path: Path) -> None:
         adapter=adapter, cache_dir=cache,
     )
     argv = adapter.raw_calls[-1][0]
-    assert argv[3].startswith("--result-file=")
-    assert argv[4] == "--summary=Agent result recorded"
+    assert argv[5].startswith("--result-file=")
+    assert argv[6] == "--summary=Agent result recorded"
     assert "private result" not in "\0".join(argv)
 
 
@@ -223,7 +230,7 @@ def test_session_end_completes_unfinished_card(tmp_path: Path) -> None:
 
     assert adapter.calls[-1] == (
         [
-            "done", "--task", "t_12345678",
+            "done", "--board", "test-board", "--task", "t_12345678",
             "--result=Claude session ended: logout",
             "--summary=Claude session ended: logout",
         ],
@@ -268,13 +275,13 @@ def test_new_prompt_completes_card_left_by_missing_stop(tmp_path: Path) -> None:
 
     assert adapter.calls[2] == (
         [
-            "done", "--task", "t_12345678",
+            "done", "--board", "test-board", "--task", "t_12345678",
             "--result=Superseded by a new user prompt after a missing Stop event",
             "--summary=Superseded by a new user prompt after a missing Stop event",
         ],
         project.resolve(),
     )
-    assert adapter.calls[3][0][:2] == ["start", "--title-file"]
+    assert adapter.calls[3][0][:4] == ["start", "--board", "test-board", "--title-file"]
     assert adapter.calls[3][0][-4:-2] == ["--source", "claude-code"]
     assert adapter.calls[3][0][-2] == "--idempotency-key"
     assert re.fullmatch(r"[0-9a-f]{64}", adapter.calls[3][0][-1])
@@ -315,7 +322,7 @@ def _usage_argv(
     task_id: str = "t_12345678",
 ) -> list[str]:
     return [
-        "update", "--task", task_id,
+        "update", "--board", "test-board", "--task", task_id,
         "--message", _usage_message(usage, model=model, task_id=task_id),
         "--idempotency-key", _event_id(task_id),
     ]
@@ -485,7 +492,7 @@ def test_post_tool_use_accumulates_and_stop_records_usage_comment(
     assert adapter.calls[-2] == (expected_argv, project.resolve())
     assert adapter.calls[-1] == (
         [
-            "done", "--task", "t_12345678",
+            "done", "--board", "test-board", "--task", "t_12345678",
             "--result=done working", "--summary=done working",
         ],
         project.resolve(),
@@ -543,7 +550,7 @@ def test_malformed_post_tool_use_payloads_are_ignored(tmp_path: Path) -> None:
     assert state["usage"] == {"skills": {"unknown": 1}}
 
 
-def test_old_state_files_without_usage_still_complete(tmp_path: Path) -> None:
+def test_old_state_without_authority_is_retained(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     cache = tmp_path / "cache"
@@ -558,23 +565,12 @@ def test_old_state_files_without_usage_still_complete(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    handle_event(
-        "stop",
-        {"session_id": "legacy", "last_assistant_message": "ok"},
-        adapter=adapter,
-        cache_dir=cache,
-    )
-
-    assert adapter.calls == [
-        (
-            _usage_argv({}),
-            project.resolve(),
-        ),
-        ([
-            "done", "--task", "t_12345678", "--result=ok", "--summary=ok",
-        ], project.resolve()),
-    ]
-    assert list(cache.glob("*.json")) == []
+    before = state_path.read_bytes()
+    with pytest.raises(RuntimeError, match="routing authority unavailable"):
+        handle_event("stop", {"session_id": "legacy", "last_assistant_message": "ok"},
+                     adapter=adapter, cache_dir=cache)
+    assert adapter.calls == []
+    assert state_path.read_bytes() == before
 
 
 def test_malformed_usage_in_state_is_ignored(tmp_path: Path) -> None:
@@ -589,6 +585,8 @@ def test_malformed_usage_in_state_is_ignored(tmp_path: Path) -> None:
         json.dumps({
             "cwd": str(project),
             "task_id": "t_12345678",
+            "lifecycle": {"session": "bad-usage", "source": "claude-code",
+                          "board": "test-board", "idempotency_key": "a" * 64},
             "usage": {
                 "skills": "garbage",
                 "surprise": {"x": 1},
@@ -611,7 +609,7 @@ def test_malformed_usage_in_state_is_ignored(tmp_path: Path) -> None:
             project.resolve(),
         ),
         ([
-            "done", "--task", "t_12345678", "--result=ok", "--summary=ok",
+            "done", "--board", "test-board", "--task", "t_12345678", "--result=ok", "--summary=ok",
         ], project.resolve()),
     ]
 
@@ -703,7 +701,7 @@ def test_session_end_records_usage_comment_before_completion(tmp_path: Path) -> 
     )
     assert adapter.calls[-1] == (
         [
-            "done", "--task", "t_12345678",
+            "done", "--board", "test-board", "--task", "t_12345678",
             "--result=Claude session ended: logout",
             "--summary=Claude session ended: logout",
         ],
@@ -749,8 +747,8 @@ def test_usage_comment_failure_still_completes_card(
         cache_dir=cache,
     )
 
-    assert calls[-1][0][3].startswith("--result-file=")
-    assert calls[-1][0][4] == "--summary=Agent result recorded"
+    assert calls[-1][0][5].startswith("--result-file=")
+    assert calls[-1][0][6] == "--summary=Agent result recorded"
     assert list(cache.glob("*.json")) == []
 
 
@@ -841,8 +839,8 @@ def test_usage_comment_is_not_reposted_when_done_fails_then_retries(
 
     updates = [argv for argv, _ in calls if argv[0] == "update"]
     assert updates == [_usage_argv({"skills": {"run": 1}})]
-    assert calls[-1][0][3].startswith("--result-file=")
-    assert calls[-1][0][4] == "--summary=Agent result recorded"
+    assert calls[-1][0][5].startswith("--result-file=")
+    assert calls[-1][0][6] == "--summary=Agent result recorded"
     assert list(cache.glob("*.json")) == []
 
 
@@ -986,13 +984,9 @@ def test_state_write_failure_closes_created_card(
             cache_dir=tmp_path / "cache",
         )
 
-    assert adapter.calls[-1] == (
-        [
-            "done", "--task", "t_12345678", "--summary",
-            "Hook state persistence failed; card closed automatically",
-        ],
-        project.resolve(),
-    )
+    # 멱등적인 시작은 생성 소유권의 증거가 아니다. 디스크 오류를 이유로
+    # 보상 처리를 위해 기존 작업을 완료할 권한을 부여해서는 안 된다.
+    assert [call[0][0] for call in adapter.calls] == ["start"]
 
 
 def test_predictable_title_and_result_paths_are_preserved(tmp_path: Path) -> None:
@@ -1138,7 +1132,8 @@ def test_start_fails_closed_when_cache_is_replaced_after_card_creation(
 
     assert not list(cache.iterdir())
     assert len(list(retained.glob("*.json"))) == 1
-    assert [call[0] for call in calls] == ["start", "done"]
+    # 캐시 교체는 작업에 대한 파괴적인 보상 처리 권한을 부여하지 않는다.
+    assert [call[0] for call in calls] == ["start"]
 
 
 def test_error_logging_never_appends_to_foreign_hardlink(
@@ -1279,5 +1274,5 @@ def test_result_fd_survives_cache_parent_rename_before_external_read(
         cache_dir=cache,
     )
 
-    assert base.calls[-1][0][3] == "--result=done"
+    assert base.calls[-1][0][5] == "--result=done"
     assert not list(cache.glob("*.json"))

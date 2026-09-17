@@ -2,7 +2,7 @@
 
 포팅과 비활성 검증을 완료했다. 프로젝트 전체 pytest는 1218 passed이며, 실제 설치·서비스 활성화나 프로젝트 commit/push는 수행하지 않았다.
 
-이 문장의 범위는 최초 `27b9ecc1196` 포팅 검증 시점이다. 이후 승인된 운영 적용의 독립 리뷰에서 JSON decoder 제한 예외 누락을 발견해 기존 세 커밋 위에 `dfb94249a5fa3f0505c41896b6f4ec51c1b9a4be`를 추가했다. official frozen SHA는 유지했다. 깊은 JSON과 긴 정수 댓글의 회귀는 4 failed를 확인한 뒤 11 passed로 전환했고, 최초 포팅 증거는 아래에 그대로 보존한다. 현재 배포 대상은 README와 manifest의 네 번째 carried commit이며, 운영 활성화 증거는 별도 최종 handoff로 기록한다.
+이 문장의 범위는 최초 `27b9ecc1196` 포팅 검증 시점이다. 이후 승인된 운영 적용의 독립 리뷰에서 JSON decoder 제한 예외 누락을 발견해 기존 세 커밋 위에 `dfb94249a5fa3f0505c41896b6f4ec51c1b9a4be`를 추가했다. official frozen SHA는 유지했다. 깊은 JSON과 긴 정수 댓글의 회귀는 4 failed를 확인한 뒤 11 passed로 전환했고, 최초 포팅 증거는 아래에 그대로 보존한다. 당시 배포 후보는 위 포팅 이력의 네 번째 carried commit이었습니다. 현재 배포 후보의 버전과 commit은 [README](../README.md#포함된-hermes-버전)에서 확인하며, 이 문서는 현재 후보의 운영 활성화 증거가 아닙니다.
 
 ## 작업 범위와 고정 기준
 

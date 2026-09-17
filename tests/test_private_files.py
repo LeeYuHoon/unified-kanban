@@ -59,7 +59,7 @@ def test_expected_replacement_restores_foreign_successor(
     ):
         private_files.atomic_publish(path, b"new", expected_identity=expected)
 
-    assert swaps == 2
+    assert swaps == 1
     assert path.read_bytes() == b"foreign"
 
 
@@ -86,6 +86,12 @@ def test_failed_swap_back_retains_displaced_foreign_inode(
         raise OSError("injected swap-back failure")
 
     monkeypatch.setattr(private_files, "_swap_names", substitute_then_fail)
+    real_rename = private_files._rename_exclusive
+    def fail_recovery(directory_fd, source, destination):
+        if swaps:
+            raise OSError("injected exclusive recovery failure")
+        real_rename(directory_fd, source, destination)
+    monkeypatch.setattr(private_files, "_rename_exclusive", fail_recovery)
 
     with pytest.raises(
         RuntimeError, match="could not restore canonical namespace"
@@ -95,6 +101,7 @@ def test_failed_swap_back_retains_displaced_foreign_inode(
     retained = [item for item in tmp_path.iterdir() if item.is_file() and _identity(item) == foreign_identity]
     assert len(retained) == 1
     assert retained[0].read_bytes() == b"foreign"
+    assert path.read_bytes() == b"new"
 
 
 def test_retirement_restores_foreign_successor(
@@ -404,3 +411,154 @@ def test_atomic_publish_existing_leaf_dup_failure_closes_fd(tmp_path, monkeypatc
     assert set(os.listdir("/dev/fd")) == before
     assert path.read_bytes() == b"original"
     assert list(tmp_path.iterdir()) == [path]
+
+@pytest.mark.parametrize("failure", ["successor", "recovery-io"])
+def test_recovery_never_overwrites_or_removes_canonical(tmp_path, monkeypatch, failure):
+    path = tmp_path / "state.json"
+    path.write_bytes(b"old")
+    _, expected = private_files.read_bytes(path)
+    real_swap = private_files._swap_names
+    real_rename = private_files._rename_exclusive
+    active = False
+    injected = False
+    def boundary():
+        nonlocal injected
+        if not injected:
+            injected = True
+            if failure == "successor":
+                successor = tmp_path / "second"
+                successor.write_bytes(b"foreign-two")
+                os.replace(successor, path)
+            else:
+                raise OSError("second recovery failed")
+    def swap(fd, first, second):
+        nonlocal active
+        if active:
+            boundary()
+        else:
+            foreign = tmp_path / "first"
+            foreign.write_bytes(b"foreign-one")
+            os.replace(foreign, path)
+            real_swap(fd, first, second)
+            active = True
+            return
+        real_swap(fd, first, second)
+    def rename(fd, source, destination):
+        if active:
+            boundary()
+        real_rename(fd, source, destination)
+    monkeypatch.setattr(private_files, "_swap_names", swap)
+    monkeypatch.setattr(private_files, "_rename_exclusive", rename)
+    with pytest.raises(RuntimeError) as caught:
+        private_files.atomic_publish(path, b"producer", expected_identity=expected)
+    assert path.read_bytes() == (b"foreign-two" if failure == "successor" else b"producer")
+    assert isinstance(caught.value, private_files.NamespaceAuthorityError)
+    assert b"foreign-one" in [p.read_bytes() for p in tmp_path.iterdir()]
+    assert caught.value.retained_paths
+    assert all(str(p) in str(caught.value) for p in caught.value.retained_paths)
+    expected.close()
+
+
+@pytest.mark.parametrize("phase", ["detach-after", "restore-io", "restore-after", "detach-fsync", "restore-fsync", "foreign-fsync", "both-restore-io"])
+def test_recovery_durability_retains_exact_capabilities(tmp_path, monkeypatch, phase):
+    path = tmp_path / "state.json"
+    path.write_bytes(b"old")
+    expected = _identity(path)
+    real_swap, real_rename, real_sync = private_files._swap_names, private_files._rename_exclusive, os.fsync
+    active = False
+    renames = syncs = 0
+    def swap(fd, first, second):
+        nonlocal active
+        other = tmp_path / "foreign"
+        other.write_bytes(b"foreign-one")
+        os.replace(other, path)
+        real_swap(fd, first, second)
+        active = True
+    def rename(fd, source, destination):
+        nonlocal renames
+        if active:
+            renames += 1
+            if phase == "restore-io" and renames == 2 or phase == "both-restore-io" and renames >= 2:
+                raise OSError("restore failed")
+        real_rename(fd, source, destination)
+        if active and ((phase == "detach-after" and renames == 1) or (phase == "restore-after" and renames == 2)):
+            raise OSError("rename wrapper failed after mutation")
+    def sync(fd):
+        nonlocal syncs
+        if active and stat.S_ISDIR(os.fstat(fd).st_mode):
+            syncs += 1
+            if (phase == "detach-fsync" and syncs == 1 or phase in {"restore-fsync", "foreign-fsync"} and syncs == 2):
+                if phase == "foreign-fsync":
+                    other = tmp_path / "second"
+                    other.write_bytes(b"foreign-two")
+                    os.replace(other, path)
+                raise OSError("recovery durability failed")
+        real_sync(fd)
+    monkeypatch.setattr(private_files, "_swap_names", swap)
+    monkeypatch.setattr(private_files, "_rename_exclusive", rename)
+    monkeypatch.setattr(os, "fsync", sync)
+    with pytest.raises(private_files.NamespaceAuthorityError) as caught:
+        private_files.atomic_publish(path, b"producer", expected_identity=expected)
+    expected_canonical = (b"foreign-two" if phase == "foreign-fsync" else b"foreign-one"
+                          if phase in {"restore-after", "restore-fsync"} else b"producer")
+    if phase != "both-restore-io":
+        assert path.read_bytes() == expected_canonical
+    else:
+        assert not path.exists()
+    assert caught.value.retained_paths
+    assert set(caught.value.retained_paths) == set(tmp_path.iterdir())
+    for receipt in caught.value.receipts:
+        assert not receipt._closed
+        assert os.fstat(receipt.file_fd).st_nlink in {0, 1}
+        if os.fstat(receipt.file_fd).st_nlink == 1:
+            private_files._validate_receipt(receipt)
+
+
+@pytest.mark.parametrize("event", ["second-at-restore", "parent-fsync"])
+def test_recovery_retained_paths_follow_directory_authority(tmp_path, monkeypatch, event):
+    directory = tmp_path / "private"
+    directory.mkdir()
+    path = directory / "state.json"
+    path.write_bytes(b"old")
+    expected = _identity(path)
+    real_swap, real_rename, real_sync = private_files._swap_names, private_files._rename_exclusive, os.fsync
+    active = False
+    renames = 0
+    moved = tmp_path / "moved"
+    foreign_identity = None
+    def swap(fd, first, second):
+        nonlocal active
+        other = directory / "first"
+        other.write_bytes(b"foreign-one")
+        os.replace(other, path)
+        real_swap(fd, first, second)
+        active = True
+    def rename(fd, source, destination):
+        nonlocal renames, foreign_identity
+        if active:
+            renames += 1
+            if event == "second-at-restore" and renames == 2:
+                path.symlink_to("absent-foreign-target")
+                foreign_identity = _identity(path)
+        real_rename(fd, source, destination)
+    def sync(fd):
+        if active and event == "parent-fsync" and not moved.exists():
+            directory.rename(moved)
+            directory.mkdir()
+            path.write_bytes(b"foreign-parent")
+            raise OSError("directory moved during failed recovery fsync")
+        real_sync(fd)
+    monkeypatch.setattr(private_files, "_swap_names", swap)
+    monkeypatch.setattr(private_files, "_rename_exclusive", rename)
+    monkeypatch.setattr(os, "fsync", sync)
+    with pytest.raises(private_files.NamespaceAuthorityError) as caught:
+        private_files.atomic_publish(path, b"producer", expected_identity=expected)
+    actual = moved if event == "parent-fsync" else directory
+    assert set(caught.value.retained_paths) == set(actual.iterdir())
+    if event == "parent-fsync":
+        assert path.read_bytes() == b"foreign-parent"
+        assert (moved / path.name).read_bytes() == b"producer"
+    else:
+        assert path.is_symlink() and _identity(path) == foreign_identity
+        assert os.readlink(path) == "absent-foreign-target"
+    assert caught.value.canonical_authority == "unknown"

@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# 잘못된 호출은 수집 장애와 구분하고 인터프리터 실행 전에 거부한다.
+usage() {
+  printf '%s\n' 'usage: claude-kanban-hook prompt|post-tool-use|subagent-start|stop|session-end' >&2
+  exit 2
+}
+[[ $# -eq 1 ]] || usage
+case "$1" in
+  prompt|post-tool-use|subagent-start|stop|session-end) ;;
+  *) usage ;;
+esac
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
   SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -11,8 +21,16 @@ while [[ -L "$SOURCE" ]]; do
   fi
 done
 REPO_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-if ! python3 -m kanban_adapter.compatibility; then
-  exit 0
+unset PYTHONHOME
+export PYTHONPATH="$REPO_ROOT/src"
+export UNIFIED_KANBAN_DIAGNOSTIC_FD=3
+# 시스템 Python은 버전 독립 부트스트랩만 실행하고 본문은 검증된 런타임으로 넘긴다.
+BOOTSTRAP=/usr/bin/python3
+[[ -x "$BOOTSTRAP" ]] || BOOTSTRAP=python3
+if ! output="$("$BOOTSTRAP" -I -c 'import sys; sys.path.insert(0,sys.argv.pop(1)); from kanban_adapter.hook_diagnostics import bootstrap; bootstrap()' "$REPO_ROOT/src" claude_hook_entry "$@" 3>&2 2>/dev/null)"; then
+  printf '%s\n' '{"systemMessage":"unified-kanban: collection unavailable (interpreter-failed); Claude may continue."}'
+  printf '%s\n' 'claude-kanban-hook: interpreter-failed (details redacted)' >&2
+else
+  [[ -z "$output" ]] || printf '%s\n' "$output"
 fi
-exec python3 -m kanban_adapter.claude_hook "$@"
+exit 0

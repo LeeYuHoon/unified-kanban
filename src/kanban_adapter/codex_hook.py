@@ -38,6 +38,9 @@ def normalize_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "session_id": _first_text(payload, "session_id", "sessionID", "sessionId", "id"),
         "cwd": _first_text(payload, "cwd", "directory", "workspace", "projectDir"),
         "prompt": _first_text(payload, "prompt", "input", "message", "text"),
+        # Codex 0.154 네이티브 turn_id를 공유 내부 프롬프트 식별자 슬롯으로 매핑한다.
+        # 임의의 네이티브 prompt_id를 받거나 턴 식별자를 합성하지 않는다.
+        "prompt_id": _first_text(payload, "turn_id"),
         "last_assistant_message": _first_text(
             payload, "last_assistant_message", "lastAssistantMessage", "result", "message", "text"
         ),
@@ -111,7 +114,8 @@ def main(argv: Sequence[str] | None = None, *, stdin: TextIO | None = None) -> i
             source="codex",
         )
     except Exception as exc:
-        log_error(f"{args[0]}: {exc}", kind="codex")
+        from .claude_hook_entry import report_diagnostic
+        report_diagnostic(args[0], "collection-failed", exception=exc)
     return 0
 
 

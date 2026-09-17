@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# 호출 형식 오류는 수집 장애와 달리 종료 코드 2로 알린다.
+usage() {
+  printf '%s\n' 'usage: codex-kanban-hook prompt|post-tool-use|subagent-start|stop|session-end' >&2
+  exit 2
+}
+[[ $# -eq 1 ]] || usage
+case "$1" in
+  prompt|post-tool-use|subagent-start|stop|session-end) ;;
+  *) usage ;;
+esac
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
   SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -11,8 +21,12 @@ while [[ -L "$SOURCE" ]]; do
   fi
 done
 REPO_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-if ! python3 -m kanban_adapter.compatibility; then
-  exit 0
+unset PYTHONHOME
+export PYTHONPATH="$REPO_ROOT/src"
+# PATH의 구형 Python 대신 setup release를 검증하여 선택한다.
+BOOTSTRAP=/usr/bin/python3
+[[ -x "$BOOTSTRAP" ]] || BOOTSTRAP=python3
+if ! "$BOOTSTRAP" -I -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("kanban_adapter.wrapper_runtime",run_name="__main__")' "$REPO_ROOT/src" codex_hook "$@"; then
+  printf '%s\n' 'codex-kanban-hook: interpreter-failed (details redacted)' >&2
 fi
-exec python3 -m kanban_adapter.codex_hook "$@"
+exit 0

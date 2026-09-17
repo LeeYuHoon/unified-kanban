@@ -1,17 +1,21 @@
 # 대화 수집 릴리스 후보 검증
 
-## 고정된 배포 입력
+> 이 문서는 Hermes 0.21.1과 carried commit `7b6c1856d60384116d2a3d496586989308bc463d` 후보를 검증하던 당시의 기록입니다. 아래 pin·bundle·실행 결과는 현재 후보의 통과 또는 운영 적용 증거가 아닙니다. 현재 버전과 commit은 [README](../README.md#포함된-hermes-버전), 수집 보안 계약은 [Claude·Codex 수집 계약](claude-absent-start-security.md)을 확인하세요. 현재 후보의 최종 검증은 해당 후보와 같은 소스 목록에 연결된 별도 결과로 판단합니다.
+
+## 당시 고정한 배포 입력
 
 - Hermes Agent 버전: `0.21.1`.
 - 공식 기반: `f03ed94a34f47ebca57e4a1b0a890bc2aeb5e140`.
 - 최종 carried commit: `7b6c1856d60384116d2a3d496586989308bc463d`.
 - bundle SHA-256: `d7a11dbe640867887eda9c80c5245ecf8852eafa6c8ea361a8c8bec3aaf1252c`.
 - bundle 크기: 276926 bytes. 순서가 있는 carried ref: 39개.
-- upstream 최신판 조회·갱신은 이번 배포 뒤 별도 작업이다. 위 pin을 이동하지 않는다.
+- 당시 검증에서는 위 pin을 이동하지 않았고, upstream 최신판 조회·갱신은 별도 작업으로 남겼다.
 
 이번 native commit은 외부 binding 부재 시 GET의 HTTP 503 처리와 해당 API 회귀 테스트 두 파일만 포함한다. bundle은 별도의 Git 제어 저장소에서 생성하며 공유 source 저장소의 carried ref는 바꾸지 않는다.
 
 ## 수집 범위와 실제 관찰
+
+이 절의 카드 ID와 관찰 결과는 당시 후보의 이력이며 현재 네이티브 final 경로의 완료 증거가 아닙니다. 현재 보안·운영 계약은 [Claude·Codex 수집 계약](claude-absent-start-security.md)을 따릅니다. 현재 후보는 요청만 있는 binding을 먼저 발행하지 않고 final 준비까지 유한하게 기다립니다. 아래의 Claude 요청만 있는 부분 기록을 새 동작의 기대 결과나 실사용 재검증으로 해석하지 않습니다.
 
 새로운 대화 구간만 수집하며 과거 기록은 소급 수집하지 않는다. Claude 시작 시 transcript가 없으면 검증된 이후 구간만 부분 기록으로 표시한다. 카드의 최종 결과와 대화의 최종 assistant 응답은 별개의 기록이다. 대화 응답이 없을 때 카드 결과로 채우지 않는다.
 

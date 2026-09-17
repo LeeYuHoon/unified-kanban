@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import venv
 from pathlib import Path
 
 manager, agent_repo, upstream, carried = sys.argv[1:5]
@@ -42,6 +43,30 @@ spec = importlib.util.spec_from_file_location("hermes_release_manager", manager)
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 layout = helper.release_layout(agent_repo, upstream, carried)
+# 완료된 릴리스는 변경 없이 실제 검증을 거쳐 재사용한다.
+if (layout.release / helper._COMPLETION_RECEIPT).exists():
+    helper._verify_completed_release(layout, upstream, carried)
+    raise SystemExit(0)
+# 모의 릴리스도 래퍼가 검증하는 실제 venv 인터프리터를 제공한다.
+venv.EnvBuilder(with_pip=False).create(layout.release / "venv")
+python = layout.release / "venv/bin/python"
+site = Path(subprocess.check_output(
+    [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+    text=True,
+).strip())
+# 서비스 실행은 여전히 모의 처리하고 plist 생성만 설치된 모듈로 제공한다.
+gateway = site / "hermes_cli"
+gateway.mkdir(exist_ok=True)
+(gateway / "__init__.py").write_text("")
+(gateway / "gateway.py").write_text(
+    "import plistlib, sys\\n"
+    "def generate_launchd_plist():\\n"
+    "    return plistlib.dumps({'Label': 'ai.hermes.gateway', "
+    "'ProgramArguments': [sys.executable, '-m', 'hermes_cli.main', 'gateway', "
+    "'run', '--replace', '--external-supervisor'], "
+    "'EnvironmentVariables': {'PATH': '/usr/bin:/bin'}, 'RunAtLoad': True}).decode()\\n"
+)
+helper._precompile_release_bytecode(layout.release)
 if not (layout.release / ".git").is_dir():
     subprocess.run(
         ["git", "init", "-q", "--initial-branch=main"],
@@ -49,25 +74,29 @@ if not (layout.release / ".git").is_dir():
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        [
-            "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-            "commit", "-q", "--allow-empty", "-m", "reviewed release",
-        ],
-        cwd=layout.release,
-        check=True,
-        capture_output=True,
-    )
+    # Import authentic manifest-tip commit/tree objects (not runtime source).
+    # Git checks object hashes; no verifier or authority function is mocked.
+    import base64
+    raw = base64.b64decode((Path(__file__).parent / "unified-kanban/setup-carried-objects.b64").read_bytes(), validate=False)
+    subprocess.run(["git", "unpack-objects"], input=raw, cwd=layout.release, check=True)
+    subprocess.run(["git", "cat-file", "-e", carried + "^{commit}"], cwd=layout.release, check=True)
+    subprocess.run(["git", "update-ref", "refs/heads/main", carried], cwd=layout.release, check=True)
 if not (layout.release / helper._COMPLETION_RECEIPT).exists():
-    # This setup harness uses the publication manifest's carried SHA without
-    # importing its Git objects, so no synthetic commit can have that chosen
-    # object id. Install the exact producer stamp bytes/mode, bypass only that
-    # impossible preimage check, and still let the real producer construct and
-    # durably publish the complete receipt-v2 payload.
-    stamp = layout.release / helper._BYTECODE_FINGERPRINT
-    stamp.write_text(f"git:refs/heads/main:{carried}", encoding="utf-8")
-    stamp.chmod(0o600)
-    helper._verify_bytecode_fingerprint = lambda _release, _carried: None
+    helper._publish_bytecode_fingerprint(layout.release, carried)
+    # Materialize a real, sealed TUI closure; no authority/verifier replacement.
+    import json
+    runtime = layout.release / "tui-runtime"
+    (runtime / "app").mkdir(parents=True, exist_ok=True)
+    (layout.release / "ui-tui").mkdir(exist_ok=True)
+    (layout.release / "ui-tui/package.json").write_text("{}")
+    for name, data in (("node", "#!/bin/sh\\nexit 0\\n"), ("app/entry.js", "// synthetic TUI"), ("app/package.json", '{"type":"module"}')):
+        target = runtime / name
+        target.write_text(data)
+        target.chmod(0o700 if name == "node" else 0o600)
+    receipt = layout.release / ".hermes-tui-runtime.json"
+    receipt.write_text(json.dumps(dict(schema=1, kind="unified-kanban-prebuilt-tui", node="tui-runtime/node", entry="tui-runtime/app/entry.js", cwd="tui-runtime/app", files=helper._tui_closure_inventory(layout.release))))
+    receipt.chmod(0o600)
+    helper.verify_release_tui(layout.release)
     helper._publish_completion_receipt(layout, upstream, carried)
 '''
 
@@ -281,6 +310,7 @@ def fake_env(
     fixture_root = tmp_path / "unified-kanban"
     for name in ("bin", "scripts", "patches", "src", "integrations"):
         shutil.copytree(REPO / name, fixture_root / name, dirs_exist_ok=True)
+    shutil.copyfile(REPO / "tests/fixtures/setup-carried-objects.b64", fixture_root / "setup-carried-objects.b64")
     fake_bin, log = install_fake_hermes(
         tmp_path,
         boards=boards,
@@ -332,8 +362,6 @@ def fake_env(
         "  release=\"$3.releases/release-$5\"\n"
         "  mkdir -p \"$release/venv/bin\"\n"
         "  chmod 0700 \"$3.releases\"\n"
-        "  cp \"$0\" \"$release/venv/bin/python\"\n"
-        "  chmod +x \"$release/venv/bin/python\"\n"
         "  cp \"$FAKE_HERMES_EXECUTABLE\" \"$release/venv/bin/hermes\"\n"
         "  chmod +x \"$release/venv/bin/hermes\"\n"
     # 모의 빌드도 생산자가 남기는 것을 그대로 남겨야 한다. 설치된 호스트는

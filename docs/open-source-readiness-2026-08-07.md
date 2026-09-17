@@ -1,8 +1,10 @@
 # Open-source readiness review — updated 2026-08-14
 
+> 이 문서는 과거 공개 준비 후보의 검토 이력입니다. 아래 전체 테스트·bundle·빌드·원격 저장소 상태는 당시 관찰에만 해당하며 현재 후보를 보증하지 않습니다. 현재 pin은 [README](../README.md#포함된-hermes-버전)에서 확인하세요. 현재 후보의 전체 검증·운영 확인·공개 승인은 별도로 완료해야 합니다.
+
 ## Verdict
 
-The repository has the documentation, licensing, contribution, security, CI, maintenance, package metadata, and code-level responsibility descriptions expected for an alpha open-source release. The current candidate is covered by the complete collected test suite. Publication is not yet complete: the GitHub repository remains private, the candidate is intentionally uncommitted while exact-tree reviews run, and remote Actions have not run against these files. Independent security, portability, and canonical model reviews must all pass on the same frozen tree before publication.
+당시 저장소는 알파 공개에 필요한 문서·라이선스·기여·보안·CI·유지보수·패키지 메타데이터와 코드 책임 설명을 갖췄다고 평가했습니다. 당시 후보에서 수집한 테스트 결과를 아래에 보존합니다. 현재 후보의 전체 테스트 통과 여부는 이 문서로 판단하지 않습니다. 당시에는 저장소가 비공개였고 후보는 미커밋 상태였으며 해당 파일의 원격 Actions는 실행되지 않았습니다. 현재 원격 상태는 재조회하지 않았습니다. 공개 전에는 같은 동결 소스에 대한 독립 검토와 승인을 별도로 완료해야 합니다.
 
 ## 1. README and user documentation
 
@@ -76,7 +78,7 @@ It includes:
 
 Release candidates additionally require local Hermes CLI smoke, setup dry-run, Gateway/Dashboard and browser checks where applicable. CI cannot substitute for those host integration checks.
 
-Latest local candidate evidence (2026-09-04 frozen snapshot; regenerate this block whenever the pin or tree changes):
+과거 로컬 후보 증거 (2026-09-04 동결본; 현재 후보의 검증으로 재사용하지 않음):
 
 - full pytest: **1,214 passed, 2 skipped**;
 - `uv build`: source distribution and wheel built successfully with the MIT license included;
@@ -104,7 +106,7 @@ The first publication reviews failed closed on three real blockers. Runtime comp
 only `origin/main`, which could be stale while another checkout was active; distribution metadata
 published a console script that bypassed the repository wrapper; and compressed carried commit
 metadata exposed a maintainer email without preserving the upstream license notice alongside the
-bundle. All were corrected before the current candidate was frozen: runtime now binds the frozen pin, selected immutable release, completion receipt, final carried
+bundle. 다음 설명은 당시 후보를 동결하기 전에 수정한 결과에 한정합니다: runtime now binds the frozen pin, selected immutable release, completion receipt, final carried
 commit and CLI-reported upstream; moving checkout refs are not authority; the wheel publishes no
 mutation console script, while direct module execution applies the same gate and fails closed without
 repository policy files; the 13 carried commits use a project noreply identity
@@ -112,8 +114,8 @@ with identical final trees, and the full Hermes Agent MIT notice is distributed.
 fresh-import checks cover stale refs, a different active CLI, the unguarded-entry-point prohibition,
 packaged-wheel behavior, ordered bundle refs, identity privacy and third-party notice inclusion.
 Earlier independent fail-closed reviews passed some prior-tree corrections, but those verdicts are
-not reused for the current candidate. A stricter follow-up caught stale pre-rewrite SHAs and a missing bundle checksum in the dated verification
-record. The current record uses all 13 manifest SHAs in order and records the verified checksum,
+not reused for that historical candidate. 더 엄격한 당시 후속 검토에서 오래된 SHA와 검증 기록의 bundle checksum 누락을 발견했습니다.
+당시 기록은 13개 manifest SHA를 순서대로 사용하고 다음 검증값을 보존했습니다: checksum,
 size and prerequisite; repository tests and the scheduled workflow execute the same deterministic
 bundle verifier. Successive focused reviews then exercised undeclared refs, malformed manifests,
 duplicate metadata keys and commit SHAs, payload corruption, symlinks, path swaps and same-inode

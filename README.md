@@ -8,14 +8,15 @@ Hermes Agent, Claude Code, Codex에서 한 작업을 한곳에 모아 보여 주
 
 - Hermes Agent: `0.21.2`
 - 공식 기반 commit: `e16f686706b1e0d5334fd1ae82190058d2a19694`
-- Unified Kanban release commit: `90dfa87d8d92ad91368638cafae64f9a690fb152`
+- Unified Kanban release commit: `365cd0519e6bc0568bf545f7f6d8cc2e960b7f47`
 
+배포 커밋에는 검증된 불변 TUI 실행 경로와 내장 터미널 종료 시 출력 배출 처리가 포함됩니다.
 Hermes가 업데이트되면 이 정보도 함께 바뀌며, 실제 배포 bundle과 다르면 CI가 실패합니다.
 이 버전에는 Claude Fable 5.1 모델 목록 지원이 포함되어 있습니다.
 
 ## 무엇을 하는 프로젝트인가요?
 
-AI 도구에 일을 요청하면 진행 상황판에 카드가 생깁니다. 작업이 끝나면 결과와 사용량도 같은 카드에 기록됩니다.
+지원하는 실행 경로에서 AI 도구에 일을 요청하면 진행 상황판에 카드가 생깁니다. 작업이 끝나면 결과와 사용량도 같은 카드에 기록됩니다.
 
 - Hermes Agent, Claude Code, Codex의 작업을 한 화면에서 봅니다.
 - 작업 폴더에 맞는 상황판을 자동으로 찾습니다.
@@ -58,6 +59,18 @@ hermes kanban boards create --name "Unified Kanban Smoke" unified-kanban-smoke
 ```
 
 마지막 명령은 테스트 카드를 만들고 완료한 뒤 보관함으로 보내면서 설치 상태를 확인합니다.
+
+### 로컬 Dashboard 로그인 연결 (검증 중인 후보)
+
+`--dashboard-oauth`는 **이미 저장된 공식 등록만 재사용**합니다. 새 PC에서는 Hermes 설치 후 사용할 HOME/profile에서 먼저 등록하세요.
+```bash
+hermes auth add nous
+hermes dashboard register
+./scripts/setup.sh --dashboard-oauth --no-restart --skip-smoke
+```
+저장된 등록과 설정 충돌만 오프라인으로 검사합니다. 등록이 없으면 설치 변경 전에 멈추며 로그인·토큰 읽기/갱신·원격 등록은 하지 않습니다. 원격 등록의 유효성이나 로그인 상태는 보증하지 않습니다. `--dry-run`은 검사 예정만 출력하고 인증·설정을 쓰지 않으며, 플래그가 없으면 기존 설치와 같습니다.
+
+등록 정보는 설치 되돌리기·삭제 후에도 남습니다. **Dashboard 활성화와 실제 브라우저 로그인 확인은 별도 단계**이며 Gateway 재시작만으로 확인되지 않습니다. standalone Dashboard를 loopback에서 다시 시작해야 합니다. 대화 수집도 계속 꺼져 있으며 별도 권한 검토가 필요합니다. 설정 반영 방식과 이전 등록 표시 해결은 [OAuth 설치 안내](docs/dashboard-oauth-setup.md)를 보세요.
 
 ### Hermes Agent를 이미 사용하고 있다면
 
@@ -113,7 +126,7 @@ hermes dashboard
 2. 상황판 설정의 **Project directory**에 실제 작업 폴더의 전체 경로를 넣습니다.
 3. 해당 작업 폴더에서 Hermes Agent, Claude Code 또는 Codex를 실행합니다.
 
-이제 실제 사용자 요청마다 카드가 생기고 작업이 끝나면 결과가 기록됩니다. 카드에는 최종 응답이 남으므로 비밀번호, API 키와 같은 민감정보를 요청이나 응답에 넣지 마세요.
+지원하는 터미널 실행 경로에서는 실제 사용자 요청마다 카드가 생기고 작업이 끝나면 결과가 기록됩니다. 일반 Orca 화면의 새 작업·새 worktree·재개 버튼까지 검증했다는 뜻은 아닙니다. [실행 경로와 검증 한계](docs/native-conversation-launcher.md)를 확인하세요. 카드에는 최종 응답이 남으므로 비밀번호·API 키 등 민감정보를 요청이나 응답에 넣지 마세요.
 
 외부 CLI 작업은 **관찰 카드**로 기록됩니다. 조회·댓글·설명 편집과 기록의 완료·보관·삭제는 가능하지만, 대시보드에서 외부 작업을 재실행하거나 담당자·모델을 바꾸고 작업 상태를 이동·드래그할 수는 없습니다. 실제 작업은 원래 CLI에서 관리합니다.
 

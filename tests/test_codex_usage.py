@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+from kanban_adapter.backend import HermesCliBackend
+
 import io
 import json
 from dataclasses import dataclass, field
@@ -10,15 +13,20 @@ from kanban_adapter.codex_hook import main, normalize_payload
 from kanban_adapter.usage import concise_summary, usage_event_id
 
 
+@pytest.fixture(autouse=True)
+def isolated_board(monkeypatch):
+    monkeypatch.setattr(HermesCliBackend, "resolve_board", lambda self, **kwargs: "test-board")
+
+
 @dataclass
 class FakeAdapter:
     fail: set[str] = field(default_factory=set)
     calls: list[tuple[list[str], Path]] = field(default_factory=list)
 
     def __call__(self, argv: list[str], cwd: Path) -> str:
-        if argv[0] == "done" and argv[3].startswith("--result-file="):
-            result = Path(argv[3].split("=", 1)[1]).read_text(encoding="utf-8")
-            argv = [*argv[:3], f"--result={result}", f"--summary={concise_summary(result)}"]
+        if argv[0] == "done" and argv[5].startswith("--result-file="):
+            result = Path(argv[5].split("=", 1)[1]).read_text(encoding="utf-8")
+            argv = [*argv[:5], f"--result={result}", f"--summary={concise_summary(result)}"]
         self.calls.append((argv, cwd))
         if argv[0] in self.fail:
             raise RuntimeError(f"adapter {argv[0]} failed")
@@ -36,12 +44,14 @@ def codex_event(event: str, payload: dict, adapter, cache: Path) -> None:
 
 
 def start_card(adapter, cache: Path, project: Path) -> None:
+    # 이 사용량/lifecycle 픽스처는 양쪽 모두 네이티브 turn_id를 제공하지 않는
+    # 레거시 훅을 검증한다. 네이티브 시작은 Stop에도 동일한 ID를 요구한다.
+    # 해당 계약은 test_native_stop_correlation.py에서 별도로 검증한다.
     codex_event(
         "prompt",
         {
             "hook_event_name": "UserPromptSubmit",
             "session_id": "cx-1",
-            "turn_id": "turn-1",
             "cwd": str(project),
             "prompt": "Refactor the checkout flow",
             "model": "gpt-5.6-sol",
@@ -51,6 +61,8 @@ def start_card(adapter, cache: Path, project: Path) -> None:
         adapter,
         cache,
     )
+    state = json.loads(next(cache.glob("*.json")).read_text("utf-8"))
+    assert state["lifecycle"]["prompt_id"] is None, "legacy fixture must not start a native turn"
 
 
 def usage_payload(adapter, *, task_id: str = "t_abcdef12") -> dict:
@@ -227,7 +239,7 @@ def test_post_tool_use_records_mcp_and_subagent_start_records_agents(
         "unavailable": ["skills"],
     }
     assert adapter.calls[-1][0] == [
-        "done", "--task", "t_abcdef12",
+        "done", "--board", "test-board", "--task", "t_abcdef12",
         "--result=Checkout refactored.", "--summary=Checkout refactored.",
     ]
 

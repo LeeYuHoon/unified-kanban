@@ -2221,9 +2221,10 @@ def test_managed_launcher_executes_only_selected_release(tmp_path: Path) -> None
     helper = load_helper()
     checkout = tmp_path / "Hermes Agent"
     checkout.mkdir()
-    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
+    from tui_completed_fixture import completed_layout, complete_tui
+    layout = completed_layout(helper, checkout, tmp_path / "completed-source")
     launcher = tmp_path / "hermes"
-    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    layout.release.joinpath("venv", "bin").mkdir(parents=True, exist_ok=True)
     selected = layout.release / "venv" / "bin" / "hermes"
     selected.write_text(
         "#!/bin/sh\n"
@@ -2235,6 +2236,7 @@ def test_managed_launcher_executes_only_selected_release(tmp_path: Path) -> None
         encoding="utf-8",
     )
     selected.chmod(0o755)
+    complete_tui(helper, layout)
     layout.selector.write_bytes(helper.selector_payload(layout))
     launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
     launcher.chmod(0o755)
@@ -2468,13 +2470,15 @@ def test_managed_launcher_allows_only_exact_read_only_update_forms(
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
-    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
-    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    from tui_completed_fixture import completed_layout, complete_tui
+    layout = completed_layout(helper, checkout, tmp_path / "completed-source")
+    layout.release.joinpath("venv", "bin").mkdir(parents=True, exist_ok=True)
     selected = layout.release / "venv/bin/hermes"
     selected.write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8"
     )
     selected.chmod(0o755)
+    complete_tui(helper, layout)
     layout.selector.write_bytes(helper.selector_payload(layout))
     launcher = tmp_path / "hermes"
     launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
@@ -2499,13 +2503,15 @@ def test_managed_launcher_does_not_misclassify_update_as_an_ordinary_argument(
     helper = load_helper()
     checkout = tmp_path / "hermes-agent"
     checkout.mkdir()
-    layout = helper.release_layout(checkout, "1" * 40, "2" * 40)
-    layout.release.joinpath("venv", "bin").mkdir(parents=True)
+    from tui_completed_fixture import completed_layout, complete_tui
+    layout = completed_layout(helper, checkout, tmp_path / "completed-source")
+    layout.release.joinpath("venv", "bin").mkdir(parents=True, exist_ok=True)
     selected = layout.release / "venv/bin/hermes"
     selected.write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8"
     )
     selected.chmod(0o755)
+    complete_tui(helper, layout)
     layout.selector.write_bytes(helper.selector_payload(layout))
     launcher = tmp_path / "hermes"
     launcher.write_bytes(helper.launcher_payload(layout, helper.BASELINE_ABSENT))
@@ -2560,7 +2566,7 @@ def test_managed_launcher_distinguishes_every_retained_baseline(tmp_path: Path) 
     # 모든 설치 결정은 구별 가능한 실행기를 만들어야 한다.
     assert len({absent, bound, rebound, helper.launcher_payload(other, helper.BASELINE_ABSENT)}) == 4
     assert absent == helper.launcher_payload(layout, helper.BASELINE_ABSENT)
-    assert absent.startswith(b"#!/bin/sh\n# unified-kanban-hermes-baseline absent\n")
+    assert absent.startswith(b"#!/bin/bash\n# unified-kanban-hermes-baseline absent\n")
 
 
 @pytest.mark.parametrize(
@@ -2609,7 +2615,7 @@ def test_sync_dependencies_uses_stable_release_path_and_locked_uv(
     lines = log.read_text(encoding="utf-8").splitlines()
     assert lines == [
         f"{release}|{release / 'venv'}|venv {release / 'venv'} --python 3.11",
-        f"{release}|{release / 'venv'}|sync --extra all --extra messaging --locked",
+        f"{release}|{release / 'venv'}|sync --extra all --extra messaging --extra bedrock --extra voice --locked",
     ]
 
 

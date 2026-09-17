@@ -16,6 +16,7 @@ from kanban_adapter import conversation_runtime as runtime
 
 
 def _harness(tmp_path, monkeypatch):
+    monkeypatch.setattr(hook.HermesCliBackend, "resolve_board", lambda self, **kwargs: "demo")
     root = tmp_path / "approved"
     root.mkdir(mode=0o700)
     source = root / "new-project" / "native.jsonl"

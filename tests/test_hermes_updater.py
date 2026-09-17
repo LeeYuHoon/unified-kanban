@@ -227,9 +227,11 @@ def _python_shim(real_python: str) -> str:
         '  release="$3.releases/release-$5"\n'
         '  mkdir -p "$release/venv/bin"\n'
         '  chmod 700 "$3.releases"\n'
-        '  cp "$FAKE_HERMES_RUNTIME" "$release/venv/bin/hermes"\n'
-        '  cp "$FAKE_GATEWAY_PYTHON" "$release/venv/bin/python"\n'
-        '  chmod +x "$release/venv/bin/hermes" "$release/venv/bin/python"\n'
+        '  if [[ ! -e "$release/.unified-kanban-release.json" ]]; then\n'
+        '    cp "$FAKE_HERMES_RUNTIME" "$release/venv/bin/hermes"\n'
+        '    chmod +x "$release/venv/bin/hermes"\n'
+        '  fi\n'
+        f'  ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; PATH=/usr/bin:/bin {shlex.quote(real_python)} "$UPDATER_RECEIPT_HELPER" "$1" "$3" "$4" "$5" ) || exit $?\n'
         '  printf \'%s\\n\' "$release"\n'
         "  exit 0\n"
         "fi\n"
@@ -280,9 +282,22 @@ def test_fixture_npm_is_preflight_only(tmp_path: Path) -> None:
 
 
 def environment(tmp_path: Path, *, install_launcher: bool = True) -> dict[str, str]:
+    from test_setup import RELEASE_RECEIPT_HELPER
+
     fixture_root = tmp_path / "unified-kanban"
     for name in ("scripts", "patches", "src", "integrations"):
         shutil.copytree(ROOT / name, fixture_root / name)
+    # 실제 매니페스트의 커밋·트리 권한과 생산자의 완료 검사를 유지한다.
+    shutil.copyfile(
+        ROOT / "tests/fixtures/setup-carried-objects.b64",
+        fixture_root / "setup-carried-objects.b64",
+    )
+    receipt_helper = tmp_path / "publish-updater-release-receipt.py"
+    receipt_helper.write_text(
+        RELEASE_RECEIPT_HELPER
+        + "\nhelper._verify_completed_release(layout, upstream, carried)\n",
+        encoding="utf-8",
+    )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     home = tmp_path / "home"
@@ -346,8 +361,10 @@ def environment(tmp_path: Path, *, install_launcher: bool = True) -> dict[str, s
         "XDG_CACHE_HOME": str(home / ".cache"),
         "HERMES_HOME": str(tmp_path / "hermes-home"),
         "HERMES_AGENT_REPO": str(agent_repo),
-        "HERMES_DASHBOARD_READY_ATTEMPTS": "2",
+        # 관리형 실행기는 시작 전에 진정한 완료 증명을 검증한다.
+        "HERMES_DASHBOARD_READY_ATTEMPTS": "40",
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "UPDATER_RECEIPT_HELPER": str(receipt_helper),
         "FAKE_HERMES_RUNTIME": str(runtime),
         "FAKE_GATEWAY_PYTHON": str(gateway_python),
         "FAKE_GIT_LOG": str(tmp_path / "git.log"),

@@ -16,6 +16,7 @@ import time
 from .conversation import CollectionPolicyV1, SourceLocator, open_verified_root
 from .conversation_integration import OwnerPolicyFile, ProductionConversationAuthority
 from . import private_files as private
+from .conversation_transaction import policy_lease
 
 
 def _absolute(value: str) -> Path:
@@ -73,7 +74,8 @@ def initialize(args: argparse.Namespace) -> Path:
     if len(args.principal) > 128:
         raise ValueError("at most 128 explicit principals allowed")
     principals = set(args.principal)
-    if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9][A-Za-z0-9_.@-]{0,255}", p) for p in principals):
+    # 네임스페이스 사용자 ID를 그대로 보존하고 native의 191자 제한을 따른다.
+    if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9][A-Za-z0-9_.@:-]{0,190}", p) for p in principals):
         raise ValueError("invalid explicit principal")
     roots = {}
     for specification in args.provider_root:
@@ -101,34 +103,35 @@ def initialize(args: argparse.Namespace) -> Path:
         os.mkdir(state.name, 0o700, dir_fd=parent)
         root_fd = _owner_directory(state)
         try:
-            private.validate_directory(state.parent, parent)
-            os.mkdir("bindings", 0o700, dir_fd=root_fd)
-            private.atomic_publish(state / "authority.key", authority_secret, directory_fd=root_fd).close()
-            store = OwnerPolicyFile(state / "policy.json", secret=authority_secret)
-            store.replace(CollectionPolicyV1(
-                version=1, generation=2, activated_at_ns=now, expires_at_ns=args.expires_at_ns,
-                enabled_boards={args.board: frozenset(roots)}, minimum_binding_version=1,
-            ), expected_generation=1)
-            private.validate_directory(state, root_fd)
-            os.fsync(root_fd)
-            os.fsync(parent)
-            config = dict(schema_version=1, enabled=True, authority_secret_file=str(state / "authority.key"),
-                          kernel_secret_file=str(kernel_path), kernel_receipt=asdict(receipt),
-                          policy_file=str(state / "policy.json"), binding_root=str(state / "bindings"),
-                          principal_board_grants={p: [args.board] for p in sorted(principals)}, provider_roots=roots)
-            try:
-                private.atomic_publish(state / "runtime.json", json.dumps(config).encode() + b"\n", directory_fd=root_fd).close()
-            except private.CommittedPublicationError as error:
-                # 이름 기반 unlink를 원자적 identity 삭제라고 주장하지 않는다.
-                # 보유한 새 config inode 자체를 무효화한다. I/O 장애는 그대로 보고한다.
+            with policy_lease(state / "policy.json", exclusive=True):
+                private.validate_directory(state.parent, parent)
+                os.mkdir("bindings", 0o700, dir_fd=root_fd)
+                private.atomic_publish(state / "authority.key", authority_secret, directory_fd=root_fd).close()
+                store = OwnerPolicyFile(state / "policy.json", secret=authority_secret)
+                store.replace(CollectionPolicyV1(
+                    version=1, generation=2, activated_at_ns=now, expires_at_ns=args.expires_at_ns,
+                    enabled_boards={args.board: frozenset(roots)}, minimum_binding_version=1,
+                ), expected_generation=1)
+                private.validate_directory(state, root_fd)
+                os.fsync(root_fd)
+                os.fsync(parent)
+                config = dict(schema_version=1, enabled=True, authority_secret_file=str(state / "authority.key"),
+                              kernel_secret_file=str(kernel_path), kernel_receipt=asdict(receipt),
+                              policy_file=str(state / "policy.json"), binding_root=str(state / "bindings"),
+                              principal_board_grants={p: [args.board] for p in sorted(principals)}, provider_roots=roots)
                 try:
-                    os.ftruncate(error.receipt.file_fd, 0)
-                    os.fsync(error.receipt.file_fd)
-                except BaseException as cleanup_error:
-                    error.add_note(f"runtime invalidation failed; state may remain usable: {cleanup_error}")
-                finally:
-                    error.receipt.close()
-                raise
+                    private.atomic_publish(state / "runtime.json", json.dumps(config).encode() + b"\n", directory_fd=root_fd).close()
+                except private.CommittedPublicationError as error:
+                    # 이름 기반 unlink를 원자적 identity 삭제라고 주장하지 않는다.
+                    # 보유한 새 config inode 자체를 무효화한다. I/O 장애는 그대로 보고한다.
+                    try:
+                        os.ftruncate(error.receipt.file_fd, 0)
+                        os.fsync(error.receipt.file_fd)
+                    except BaseException as cleanup_error:
+                        error.add_note(f"runtime invalidation failed; state may remain usable: {cleanup_error}")
+                    finally:
+                        error.receipt.close()
+                    raise
         finally:
             os.close(root_fd)
     finally:
@@ -145,8 +148,29 @@ def main(argv=None) -> int:
     init.add_argument("--principal", required=True, action="append")
     init.add_argument("--provider-root", required=True, action="append")
     init.add_argument("--expires-at-ns", required=True, type=int)
+    grant = commands.add_parser("grant-existing")
+    grant.add_argument("--runtime-config", required=True)
+    grant.add_argument("--board", required=True)
+    grant.add_argument("--provider", required=True, action="append", choices=("claude", "codex"))
+    grant.add_argument("--principal", required=True, action="append")
+    grant.add_argument("--expected-policy-generation", required=True, type=int)
+    grant.add_argument("--expected-config-sha256", required=True)
+    mode = grant.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    recovery = commands.add_parser("recover-grant")
+    for option in ("runtime-config", "policy-file", "secret-file"):
+        recovery.add_argument("--" + option, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.command == "recover-grant":
+            from .conversation_transaction import recover_grant
+            print(json.dumps(recover_grant(args), sort_keys=True))
+            return 0
+        if args.command == "grant-existing":
+            from .conversation_transaction import grant_existing
+            print(json.dumps(grant_existing(args), sort_keys=True))
+            return 0
         initialize(args)
     except (OSError, RuntimeError, TypeError, ValueError) as error:
         print(f"conversation-owner: {error}", file=sys.stderr)

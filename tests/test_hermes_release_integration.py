@@ -8,8 +8,11 @@
 대신 이 모듈은 실제 생산자를 구동한다. 실제 Hermes 객체 데이터베이스에서 제공한
 검토된 핀, ``patches/``의 검토된 반입 번들, 실제 반입 번들 검증기, 실제 관리형
 실행기를 사용한다. Hermes의 전체 의존성 트리를 해석하는 작업은 이 테스트의 입증
-대상과 무관한 네트워크 다운로드이므로 의존성 설치기만 통제하며, 소스 체크아웃,
-구체화, 영수증, 검증기, 실행기는 모두 배포되는 코드를 사용한다.
+대상과 무관한 네트워크 다운로드이므로 의존성 설치와 웹·TUI 표본 산출물만 통제하며,
+소스 체크아웃, 구체화, 영수증, 빌더, 검증기, 실행기는 모두 배포되는 코드를 사용한다.
+TUI 표본 실행은 실제 Hermes 프런트엔드 빌드나 대화형 사용의 입증이 아니다.
+호환 Node 실행 파일은 ``UNIFIED_KANBAN_TEST_NODE`` 또는 PATH로 제공해야 한다.
+Darwin에서는 시스템 dylib만 사용하는 Node가 필요하며 실제 로더 검사를 우회하지 않는다.
 
 검토된 업스트림 커밋을 객체 데이터베이스에 보유한 Git 저장소를
 ``UNIFIED_KANBAN_TEST_HERMES_SOURCE``로 지정하여 선택적으로 실행한다. 예::
@@ -92,7 +95,8 @@ def pinned_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not source.is_dir():
         unavailable(f"{SOURCE_VARIABLE}={configured} is not a directory")
     resolved = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--absolute-git-dir"],
+        # 작업트리의 관리 디렉터리가 아니라 실제 공유 객체 저장소를 선택한다.
+        ["git", "-C", str(source), "rev-parse", "--path-format=absolute", "--git-common-dir"],
         capture_output=True,
         text=True,
         check=False,
@@ -161,17 +165,86 @@ def controlled_uv(tmp_path: Path) -> Path:
 
 
 def controlled_npm(tmp_path: Path) -> Path:
-    """실제 생산자의 잠금 기반 웹 빌드 경로에 최소 산출물을 제공한다."""
+    """웹·TUI 설치 산출물만 통제하고 실제 Node와 생산자 검증은 유지한다.
+
+    ``UNIFIED_KANBAN_TEST_NODE`` 또는 PATH의 호환 Node를 복사한다. Darwin에서는
+    생산자가 실제 로더 의존성을 검사하므로 셸 대체물이나 외부 dylib는 허용되지
+    않는다. TUI 표본은 의존성 없는 ESM이며 실제 Hermes 번들 빌드를 입증하지 않는다.
+    """
+    configured = os.environ.get("UNIFIED_KANBAN_TEST_NODE") or shutil.which("node")
+    if not configured:
+        pytest.fail("UNIFIED_KANBAN_TEST_NODE or a compatible Node on PATH is required")
+    node = tmp_path / "node"
+    shutil.copyfile(Path(configured).resolve(strict=True), node)
+    node.chmod(0o700)
     npm = tmp_path / "npm"
     npm.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1 $2 $3 $4\" = 'run build --workspace web' ]; then "
-        "mkdir -p node_modules hermes_cli/web_dist; "
-        "printf '<html></html>\\n' > hermes_cli/web_dist/index.html; fi\n",
+        "#!/bin/sh\nset -eu\n"
+        'case "$*" in\n'
+        "'ci --workspace web') mkdir -p node_modules ;;\n"
+        "'ci --workspace ui-tui') mkdir -p node_modules ui-tui/node_modules ;;\n"
+        "'run build --workspace web')\n"
+        "mkdir -p hermes_cli/web_dist\n"
+        "printf '<html></html>\\n' > hermes_cli/web_dist/index.html ;;\n"
+        "'run build --workspace ui-tui')\n"
+        "mkdir -p ui-tui/dist\n"
+        "printf 'export {}; console.log(\"HERMES-TUI-FIXTURE\");\\n' "
+        "> ui-tui/dist/entry.js ;;\n"
+        '*) printf "unexpected controlled npm arguments: %s\\n" "$*" >&2; exit 2 ;;\n'
+        "esac\n",
         encoding="utf-8",
     )
     npm.chmod(0o700)
     return npm
+
+
+def test_reviewed_lock_declares_startup_optional_capability_closure(
+    pinned_source: Path,
+) -> None:
+    """실제 반입 commit의 extra·lock을 검사하며 설치 성공을 합성하지 않는다."""
+    _, carried = reviewed_pins()
+    metadata = json.loads(
+        (REPO / "patches/hermes-agent-carried-bundle-metadata.json").read_text()
+    )
+    assert hashlib.sha256(BUNDLE.read_bytes()).hexdigest() == metadata["sha256"]
+    subprocess.run(
+        ["git", "-C", str(pinned_source), "bundle", "verify", str(BUNDLE)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(pinned_source), "bundle", "unbundle", str(BUNDLE)],
+        check=True, capture_output=True,
+    )
+
+    def source_toml(relative: str) -> dict:
+        return tomllib.loads(subprocess.check_output(
+            ["git", "-C", str(pinned_source), "show", f"{carried}:{relative}"],
+            text=True,
+        ))
+
+    project = source_toml("pyproject.toml")["project"]
+    packages = source_toml("uv.lock")["package"]
+    hermes = next(item for item in packages if item["name"] == "hermes-agent")
+    assert hermes["version"] == project["version"]
+    capabilities = {
+        "bedrock": {"boto3": "1.42.89"},
+        "voice": {
+            "faster-whisper": "1.2.1", "sounddevice": "0.5.5", "numpy": "2.4.3",
+        },
+    }
+    for extra, expected in capabilities.items():
+        assert set(project["optional-dependencies"][extra]) == {
+            f"{name}=={version}" for name, version in expected.items()
+        }
+        assert {item["name"] for item in hermes["optional-dependencies"][extra]} == set(expected)
+        for name, version in expected.items():
+            assert {item["version"] for item in packages if item["name"] == name} == {version}
+    # all은 모든 extra가 아니다. 이 검사는 lock 출처만 보장하고 실설치를 주장하지 않는다.
+    baseline = {
+        item["name"] for extra in ("all", "messaging")
+        for item in hermes["optional-dependencies"][extra]
+    }
+    assert not baseline.intersection({"boto3", "faster-whisper", "sounddevice", "numpy"})
 
 
 def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
@@ -249,6 +322,26 @@ def test_real_producer_builds_verifies_and_launches_the_reviewed_release(
         helper._materialized_case_collisions(
             release, helper.case_collisions(release, "HEAD"), rewrite=False
         ),
+    )
+    # 새 생산자의 TUI 폐쇄도 필수 산출물이다. 무시하지 않고 정확히 열거하고 검증한다.
+    expected |= {"?? tui-runtime/", "?? .hermes-tui-runtime.json"}
+    tui = helper.verify_release_tui(release)
+    assert set(tui["files"]) == {
+        "tui-runtime/node", "tui-runtime/app/entry.js", "tui-runtime/app/package.json",
+    }
+    assert json.loads((release / "tui-runtime/app/package.json").read_bytes()) == {
+        "type": "module",
+    }
+    assert not (release / "node_modules").exists()
+    assert not (release / "ui-tui/node_modules").exists()
+    loaded = subprocess.run(
+        [str(release / tui["node"]), str(release / tui["entry"])],
+        cwd=release / tui["cwd"], env={"PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, check=True, timeout=15,
+    )
+    assert loaded.stdout == "HERMES-TUI-FIXTURE\n"
+    assert receipt["release_sha256"] == helper._tree_digest(
+        release, excluded_top_level={".git", helper._COMPLETION_RECEIPT}
     )
     observed = set(helper._porcelain_status(release))
     assert observed - {"?? venv/", f"?? {helper._COMPLETION_RECEIPT}"} == expected

@@ -270,12 +270,20 @@ if [[ "$SELECTOR_BEFORE_KIND" != "absent" || "$BACKUP_RETAINED" == 1 ]]; then
   LAUNCHER_BEFORE="$TRANSACTION_DIR/hermes-launcher-before"
   python3 "$REPO_ROOT/scripts/path-transaction.py" export-before \
     "$TRANSACTION_RECEIPT" "$HERMES_LAUNCHER" "$LAUNCHER_BEFORE"
-  python3 - "$LAUNCHER_BEFORE" "$EXPECTED_LAUNCHER" <<'PY'
+  python3 - "$LAUNCHER_BEFORE" "$EXPECTED_LAUNCHER" "$REPO_ROOT/scripts/hermes-release-manager.py" "$AGENT_REPO" "$EXPECTED_UPSTREAM" "$FINAL_CARRIED_COMMIT" <<'PY'
 from pathlib import Path
+import runpy
 import sys
 
-actual, expected = map(Path, sys.argv[1:])
-if not actual.is_file() or actual.read_bytes() != expected.read_bytes():
+actual, expected = map(Path, sys.argv[1:3])
+producer = runpy.run_path(sys.argv[3])
+layout = producer["release_layout"](Path(sys.argv[4]), sys.argv[5], sys.argv[6])
+try:
+    actual_token = producer["launcher_baseline"](layout, actual.read_bytes(), accept_legacy=True)
+    expected_token = producer["launcher_baseline"](layout, expected.read_bytes())
+except (OSError, producer["ForeignLauncher"]):
+    actual_token, expected_token = None, "refused"
+if actual_token != expected_token:
     raise SystemExit(
         "refusing to act on a Hermes launcher that is not the managed launcher "
         "issued for the retained original launcher backup"

@@ -11,6 +11,9 @@ while [[ -L "$SOURCE" ]]; do
   fi
 done
 REPO_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-python3 -m kanban_adapter.compatibility
-exec python3 -m kanban_adapter.cli "$@"
+unset PYTHONHOME
+export PYTHONPATH="$REPO_ROOT/src"
+# 훅의 형제 CLI도 동일한 호환성/런타임 선택을 사용한다.
+BOOTSTRAP=/usr/bin/python3
+[[ -x "$BOOTSTRAP" ]] || BOOTSTRAP=python3
+exec "$BOOTSTRAP" -I -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("kanban_adapter.wrapper_runtime",run_name="__main__")' "$REPO_ROOT/src" cli "$@"

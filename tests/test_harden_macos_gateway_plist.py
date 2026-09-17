@@ -14,13 +14,14 @@ SETUP = ROOT / "scripts/setup.sh"
 
 
 def test_renders_private_sealed_gateway_plist(tmp_path: Path) -> None:
-    release_root = tmp_path / "hermes-agent.releases"
-    release = release_root / ("release-" + "a" * 40)
+    from test_hermes_release_manager import load_helper
+    from tui_completed_fixture import completed_layout, complete_tui
+    checkout = tmp_path / "hermes-agent"
+    checkout.mkdir()
+    layout = completed_layout(load_helper(), checkout, tmp_path / "completed-source")
+    complete_tui(load_helper(), layout)
+    release_root, release = layout.root, layout.release
     python = release / "venv/bin/python"
-    python.parent.mkdir(parents=True)
-    release_root.chmod(0o700)
-    python.write_text("python\n", encoding="utf-8")
-    python.chmod(0o755)
     source = tmp_path / "ai.hermes.gateway.plist"
     source.write_bytes(
         plistlib.dumps(

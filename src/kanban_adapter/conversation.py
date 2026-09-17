@@ -269,9 +269,13 @@ class CollectionPolicyV1:
     expires_at_ns: int = 2**63 - 1
     enabled_boards: Mapping[str, frozenset[str]] = field(default_factory=dict)
     minimum_binding_version: int = 1
+    schema_version: int = 1
+    pair_activated_at_ns: Mapping[str, Mapping[str, int]] | None = None
 
     def __post_init__(self) -> None:
         _require_int(self.version, "policy version", minimum=1)
+        if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
+            raise ValueError("unsupported policy schema")
         _require_int(self.generation, "policy generation", minimum=1)
         _require_int(self.activated_at_ns, "policy activation")
         _require_int(self.expires_at_ns, "policy expiry")
@@ -279,20 +283,51 @@ class CollectionPolicyV1:
             raise ValueError("policy expiry must follow activation")
         _require_int(self.minimum_binding_version, "minimum binding version", minimum=1)
         copied: dict[str, frozenset[str]] = {}
+        if not isinstance(self.enabled_boards, Mapping):
+            raise TypeError("enabled boards must be a mapping")
         for board, providers in self.enabled_boards.items():
             _require_text(board, "board", maximum=256)
             if not isinstance(providers, frozenset) or not providers:
                 raise TypeError("enabled providers must be a non-empty frozenset")
             copied[board] = frozenset(_require_text(item, "provider", maximum=64) for item in providers)
+            # 과거 claude-code 항목은 그대로 보존하되 claude 권한으로 바꾸지 않는다.
+            if not copied[board] <= {"claude", "codex", "hermes", "claude-code"}:
+                raise ValueError("unsupported policy provider")
         object.__setattr__(self, "enabled_boards", MappingProxyType(copied))
+        # 레거시의 인증된 전역 시점은 당시 켜져 있던 쌍에만 상속한다.
+        cutoffs = self.pair_activated_at_ns
+        if cutoffs is None:
+            if self.schema_version != 1:
+                raise ValueError("pair activation map required")
+            cutoffs = {board: {provider: self.activated_at_ns for provider in providers}
+                       for board, providers in copied.items()}
+        if not isinstance(cutoffs, Mapping) or set(cutoffs) != set(copied):
+            raise ValueError("pair activation boards must match enabled boards")
+        for board, values in cutoffs.items():
+            if not isinstance(values, Mapping) or set(values) != set(copied[board]):
+                raise ValueError("pair activation providers must match enabled providers")
+            for cutoff in values.values():
+                _require_int(cutoff, "pair activation")
+                if not self.activated_at_ns <= cutoff < self.expires_at_ns:
+                    raise ValueError("pair activation is outside policy lifetime")
+                if self.schema_version == 1 and cutoff != self.activated_at_ns:
+                    raise ValueError("legacy policy cannot represent pair activation")
+        object.__setattr__(self, "pair_activated_at_ns", MappingProxyType({
+            board: MappingProxyType(dict(values)) for board, values in cutoffs.items()
+        }))
+
+    def activation_for(self, board: str, provider: str) -> int | None:
+        assert self.pair_activated_at_ns is not None
+        return self.pair_activated_at_ns.get(board, {}).get(provider)
 
     @classmethod
     def disabled(cls, *, version: int, generation: int = 1) -> CollectionPolicyV1:
         return cls(version=version, generation=generation)
 
     def allows(self, board: str, provider: str, binding_version: int, now_ns: int) -> bool:
+        activation = self.activation_for(board, provider)
         return (
-            self.activated_at_ns <= now_ns < self.expires_at_ns
+            activation is not None and activation <= now_ns < self.expires_at_ns
             and binding_version >= self.minimum_binding_version
             and provider in self.enabled_boards.get(board, frozenset())
         )
@@ -329,6 +364,20 @@ class PrivatePolicyStore:
             )
 
 
+# 기존 schema pin과 MAC 직렬화는 유지하고 목표 턴 계약만 별도로 고정한다.
+CODEX_TARGET_TURN_SCHEMA_PIN = "openai/codex@rust-v0.154.0:authenticated-target-turn-v1"
+
+
+def validate_codex_target_turn(provider: str, schema_pin: str, target: str | None) -> None:
+    """목표 없는 새 계약이나 기존 계약으로의 목표 주입을 금지한다."""
+    if schema_pin == CODEX_TARGET_TURN_SCHEMA_PIN:
+        if provider != "codex":
+            raise ValueError("Codex target turn requires codex provider")
+        _require_text(target, "Codex target turn ID")
+    elif target is not None:
+        raise ValueError("Codex target turn requires dedicated schema pin")
+
+
 @dataclass(frozen=True)
 class PendingObservationBindingV1:
     board: str
@@ -348,6 +397,12 @@ class PendingObservationBindingV1:
     created_at_ns: int
     pending_receipt: str
     issuer_id: str
+    codex_target_turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_codex_target_turn(self.provider, self.schema_pin, self.codex_target_turn_id)
+        if self.codex_target_turn_id is not None and self.turn_start.ordinal is None:
+            raise ValueError("Codex target turn requires native start ordinal")
 
     @property
     def authorizes_projection(self) -> bool:
@@ -378,6 +433,17 @@ class TrustedObservationBindingV1:
     source_range_digest: str
     auth_tag: str
     issuer_id: str
+    codex_target_turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_codex_target_turn(self.provider, self.schema_pin, self.codex_target_turn_id)
+        if self.codex_target_turn_id is not None:
+            if self.turn_start.ordinal is None or self.turn_end.ordinal is None:
+                raise ValueError("Codex target turn requires native ordinal boundaries")
+            if (not isinstance(self.source_range_digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", self.source_range_digest) is None
+                    or self.source_range_digest == "0" * 64):
+                raise ValueError("Codex target turn requires sealed source digest")
 
     @property
     def authorizes_projection(self) -> bool:
@@ -407,6 +473,9 @@ class TrustedObservationBindingV1:
             "source_range_digest": self.source_range_digest,
             "issuer_id": self.issuer_id,
         }
+        # None을 추가하면 기존 binding/cursor MAC이 바뀌므로 키 자체를 생략한다.
+        if self.codex_target_turn_id is not None:
+            values["codex_target_turn_id"] = self.codex_target_turn_id
         if include_auth:
             values["auth_tag"] = self.auth_tag
         return values
@@ -526,7 +595,9 @@ class PrivateFixtureAuthority:
         policy_version: int,
         producer_execution: str,
         now_ns: int,
+        codex_target_turn_id: str | None = None,
     ) -> PendingObservationBindingV1:
+        validate_codex_target_turn(provider, schema_pin, codex_target_turn_id)
         for value, name in ((board, "board"), (task, "task"), (provider, "provider"), (schema_pin, "schema pin"), (session, "session"), (producer_execution, "producer execution")):
             _require_text(value, name)
         for value, name in ((binding_version, "binding version"), (generation, "generation"), (policy_version, "policy version")):
@@ -545,6 +616,8 @@ class PrivateFixtureAuthority:
             "policy_version": policy_version, "producer_execution": producer_execution,
             "created_at_ns": now_ns, "issuer_id": self.issuer_id,
         }
+        if codex_target_turn_id is not None:
+            body["codex_target_turn_id"] = codex_target_turn_id
         receipt = _mac("ps", self._secret, _canonical_json(body))
         pending = PendingObservationBindingV1(
             board=board, task=task, provider=provider, schema_pin=schema_pin,
@@ -554,6 +627,7 @@ class PrivateFixtureAuthority:
             binding_version=binding_version, generation=generation,
             policy_version=policy_version, producer_execution=producer_execution,
             created_at_ns=now_ns, pending_receipt=receipt, issuer_id=self.issuer_id,
+            codex_target_turn_id=codex_target_turn_id,
         )
         with self._lock:
             if receipt in self._pending or receipt in self._sealed:
@@ -618,6 +692,8 @@ class PrivateFixtureAuthority:
                 "source_range_digest": source_range_digest,
                 "issuer_id": self.issuer_id,
             }
+            if pending.codex_target_turn_id is not None:
+                values["codex_target_turn_id"] = pending.codex_target_turn_id
             auth_tag = _mac("bd", self._secret, _canonical_json(values))
             binding = TrustedObservationBindingV1(
                 board=pending.board, task=pending.task, provider=pending.provider,
@@ -633,6 +709,7 @@ class PrivateFixtureAuthority:
                 producer_receipt=producer_receipt, binding_ref=binding_ref,
                 source_range_digest=source_range_digest,
                 auth_tag=auth_tag, issuer_id=self.issuer_id,
+                codex_target_turn_id=pending.codex_target_turn_id,
             )
             self._sealed.add(pending.pending_receipt)
             del self._pending[pending.pending_receipt]
@@ -644,6 +721,10 @@ class PrivateFixtureAuthority:
             raise RuntimeError("binding seal is one-shot")
 
     def _validate_binding(self, binding: TrustedObservationBindingV1) -> None:
+        try:
+            validate_codex_target_turn(binding.provider, binding.schema_pin, binding.codex_target_turn_id)
+        except ValueError as exc:
+            raise PermissionError("binding target turn contract is invalid") from exc
         if binding.issuer_id != self.issuer_id:
             raise PermissionError("binding issuer is invalid")
         if binding.boundary_alignment_proof != "producer_jsonl_lines_v1":
@@ -692,11 +773,13 @@ class PrivateFixtureAuthority:
             raise PermissionError("principal ACL scope mismatch")
         ttl_ns = _require_int(ttl_ns, "grant TTL", minimum=1, maximum=GRANT_MAX_TTL_NS)
         policy = policy_store.get(binding.board)
+        activation = policy.activation_for(binding.board, binding.provider) if policy else None
         if (
             policy is None
+            or activation is None
             or policy.version != binding.policy_version
-            or binding.created_at_ns < policy.activated_at_ns
             or not policy.allows(binding.board, binding.provider, binding.binding_version, now_ns)
+            or binding.created_at_ns < activation
         ):
             raise PermissionError("live policy denies binding")
         expiry = min(now_ns + ttl_ns, principal.expires_at_ns, policy.expires_at_ns)
