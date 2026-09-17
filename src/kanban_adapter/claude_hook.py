@@ -377,7 +377,8 @@ def _complete(
     usage = state.get("usage", {})
     tokens: dict[str, int | None] = {}
     transcript_path = state.get("transcript_path")
-    if isinstance(transcript_path, str):
+    native_codex = source == "codex" and bool(lifecycle.get("prompt_id"))
+    if not native_codex and isinstance(transcript_path, str):
         try:
             tokens = token_delta(
                 token_snapshot(source, transcript_path),
@@ -390,7 +391,65 @@ def _complete(
                 f"token-snapshot: {type(exc).__name__}",
                 kind="claude" if source == "claude-code" else source,
             )
-    if has_reportable_usage(source, usage) and not state.get("usage_comment_posted"):
+    if native_codex:
+        from .token_usage import (
+            CODEX_EVIDENCE_WAIT_SECONDS,
+            wait_for_codex_token_evidence,
+        )
+
+        # 분류, 요청 파싱, 필요한 구형 누적값 읽기를 하나의 단조 시계 기한 안에 둔다.
+        # 개별 regular-file read는 중단하지 않지만 reader가 줄과 전체 입력을 제한한다.
+        deadline = time.monotonic() + CODEX_EVIDENCE_WAIT_SECONDS
+        try:
+            # 이전 네이티브 훅은 원본 경로를 주지 않았다. 이 경우 사용량을 만들지 않고
+            # 카드 완료만 허용하며, 경로가 있는 불완전한 원본과 혼동하지 않는다.
+            status = "empty" if not isinstance(transcript_path, str) else "pending"
+            events = []
+            legacy_snapshot = None
+            if isinstance(transcript_path, str):
+                try:
+                    status, events, legacy_snapshot = wait_for_codex_token_evidence(
+                        transcript_path,
+                        session=lifecycle["session"],
+                        turn=lifecycle["prompt_id"],
+                        deadline=deadline,
+                    )
+                    if status == "legacy":
+                        tokens = token_delta(
+                            legacy_snapshot,
+                            state.get("token_baseline", {}),
+                        )
+                except (OSError, ValueError):
+                    status = "malformed"
+            # 대기 예산 뒤에도 완료 경계가 없으면 대화 보존 작업에 맡기고 카드는
+            # 사용량 없이 완료한다. 이후 재시도 신호가 없으므로 상태를 영구 고립시키지 않는다.
+            if status == "pending":
+                status = "empty"
+            if status == "malformed":
+                raise RuntimeError("Codex usage evidence not ready")
+            if status == "legacy":
+                messages = [usage_comment(source=source, model=state.get('model'), usage=usage,
+                    tokens=tokens, unavailable=unavailable_categories(source),
+                    event_id=usage_event_id(source, state['task_id']),
+                    usage_at=int(time.time()), usage_timing='completion')]
+            elif status == "ready":
+                messages = [usage_comment(source=source, model=event.get('model') or state.get('model'),
+                    usage=usage if index == 0 else {}, tokens=event['tokens'],
+                    unavailable=unavailable_categories(source),
+                    event_id=usage_event_id(source, state['task_id'], event['request_hash']),
+                    request_hash=event['request_hash'], usage_at=event['usage_at'], usage_timing='request')
+                    for index, event in enumerate(events or [])]
+            else:
+                messages = []
+            if messages:
+                adapter(['publish-codex-usage', '--board', board, '--task', state['task_id'],
+                         '--message', json.dumps(messages)], cwd)
+        except BaseException:
+            # telemetry 어느 지점에서 중단되어도 열린 state 권한을 정확히 한 번 닫고,
+            # 저장된 result와 lifecycle은 안전한 재시도를 위해 그대로 둔다.
+            state_identity.close()
+            raise
+    if not native_codex and has_reportable_usage(source, usage) and not state.get("usage_comment_posted"):
         # event id는 이 프로세스가 아니라 card에서 유도한다. 따라서 충돌이나 marker
         # 쓰기 실패 후 재시도해도 같은 값을 다시 계산하며, adapter는 이미 추가한
         # comment를 인식한다.

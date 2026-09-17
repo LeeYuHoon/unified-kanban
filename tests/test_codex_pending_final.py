@@ -11,7 +11,11 @@ from test_conversation_integration_security_fixes import _receipt
 
 
 def harness(tmp_path, monkeypatch):
+    from kanban_adapter import token_usage
+
     source, service, args, _ = setup(tmp_path)
+    # 합성 원본의 승인 루트를 실제 CODEX_HOME/sessions 경계 대신 명시한다.
+    monkeypatch.setattr(token_usage, '_default_root', lambda provider: source.parent)
     monkeypatch.setattr(hook.HermesCliBackend, 'resolve_board', lambda self, **kw: 'demo')
     monkeypatch.setenv('UNIFIED_KANBAN_CONVERSATION_CONFIG', str(tmp_path / 'config'))
     monkeypatch.setattr(runtime, 'get_conversation_service', lambda: service)

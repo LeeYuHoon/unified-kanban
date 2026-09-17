@@ -275,6 +275,91 @@ class HermesCliBackend:
         argv.extend(["--", task_id, message])
         self.runner(argv)
 
+    def publish_codex_usage(self, *, board: str, task_id: str, messages: list[str]) -> None:
+        """확정된 요청 배치를 게시하기 전에 기존 완료 키를 예약한다.
+
+        훅의 로컬 완료 상태가 아니라 원격 댓글을 권위 있는 기준으로 삼는다.
+        모든 재시도는 먼저 확정된 바이트를 읽는다. 구형 완료 기록기도 같은 키를
+        사용하므로 요청 모드로 예약된 뒤에는 합계를 삽입할 수 없다.
+        """
+        from .usage import usage_event_id
+        slot = usage_event_id("codex", task_id)
+        marker = "Codex request batch v1\n"
+
+        def validate(batch):
+            if not isinstance(batch, list) or len(batch) > 128:
+                raise ValueError("invalid Codex usage batch")
+            if len(json.dumps(batch).encode()) > 48000:
+                raise ValueError("Codex usage batch exceeds bound")
+            events = []
+            for body in batch:
+                if not isinstance(body, str) or not body.startswith("Codex tool usage\n"):
+                    raise ValueError("invalid Codex usage body")
+                event = json.loads(body.partition("\n")[2])
+                request = event.get("request_hash")
+                version = event.get('schema_version')
+                if (event.get("source") != "codex" or version not in (1, 2)
+                        or (request is not None and version != 2)
+                        or event.get("event_id") != usage_event_id("codex", task_id, request)
+                        or (request is not None and (not isinstance(request, str)
+                            or not re.fullmatch(r"[0-9a-f]{16}", request)))
+                        or (version == 2 and event.get("usage_timing") != ("request" if request else "completion"))):
+                    raise ValueError("invalid Codex usage identity")
+                events.append(event)
+            if len({e['event_id'] for e in events}) != len(events):
+                raise ValueError("duplicate Codex usage identity")
+            if any(e.get('request_hash') is None for e in events) and len(events) != 1:
+                raise ValueError("mixed Codex usage modes")
+            return events
+
+        def read():
+            payload = json.loads(self.runner([
+                "hermes", "kanban", "--board", board, "show", "--json", "--", task_id,
+            ]))
+            if payload.get("task", {}).get("id") != task_id or not isinstance(payload.get("comments"), list):
+                raise RuntimeError("Codex usage readback scope mismatch")
+            return [c['body'] for c in payload['comments']
+                    if c.get('author') == 'kanban-adapter' and isinstance(c.get('body'), str)]
+
+        bodies = read()
+        # 키 도입 전의 기존 댓글도 영구히 기존 방식으로 유지하며 소급 보완하지 않는다.
+        legacy = [b for b in bodies if b.startswith("Codex tool usage\n")
+                  and json.loads(b.partition('\n')[2]).get('event_id') == slot]
+        frozen = [b for b in bodies if b.startswith(marker)]
+        if not frozen and any(b.startswith('Codex tool usage\n') and b not in legacy for b in bodies):
+            raise RuntimeError('unreserved historical Codex usage')
+        if legacy:
+            if frozen:
+                raise RuntimeError("conflicting Codex publication modes")
+            return
+        if not frozen:
+            # 재시도는 새로 계산한 후보가 아니라 원격에 확정된 상태에서 재개한다.
+            events = validate(messages)
+            if not messages:
+                # Stop 이후에도 네이티브 증거가 추가될 수 있다. 사용량 자료가 없는데도
+                # 완료 처리하지 말고 연관된 재시도를 위해 수명 주기의 권위 있는 상태를 유지한다.
+                raise RuntimeError("Codex usage evidence not ready")
+            candidate = (marker + json.dumps(messages, separators=(',', ':'))
+                         if events[0].get('request_hash') else messages[0])
+            self.update(board=board, task_id=task_id, message=candidate, idempotency_key=slot)
+            bodies = read()
+            frozen = [b for b in bodies if b.startswith(marker)]
+            legacy = [b for b in bodies if b.startswith("Codex tool usage\n")
+                      and json.loads(b.partition('\n')[2]).get('event_id') == slot]
+            if legacy and not frozen:
+                return
+        if len(frozen) != 1 or legacy:
+            raise RuntimeError("Codex usage reservation readback failed")
+        batch = json.loads(frozen[0][len(marker):])
+        frozen_events = validate(batch)
+        if not frozen_events or any(not e.get('request_hash') for e in frozen_events):
+            raise RuntimeError("invalid frozen request mode")
+        for body, event in zip(batch, frozen_events):
+            self.update(board=board, task_id=task_id, message=body, idempotency_key=event['event_id'])
+        observed = read()
+        if any(body not in observed for body in batch):
+            raise RuntimeError("Codex usage publication readback failed")
+
     def done(
         self,
         *,

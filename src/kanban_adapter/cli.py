@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     # 댓글이 추가되므로, 재시도된 게시가 댓글을 중복시킬 수 없다.
     update.add_argument("--idempotency-key", dest="idempotency_key")
 
+    publish = sub.add_parser("publish-codex-usage")
+    publish.add_argument("--board")
+    publish.add_argument("--task", required=True)
+    publish.add_argument("--message", required=True)
+
     done = sub.add_parser("done")
     done.add_argument("--board")
     done.add_argument("--task", required=True)
@@ -125,6 +130,10 @@ def main(
             if args.idempotency_key is not None:
                 options["idempotency_key"] = args.idempotency_key
             service.update(**options)
+        elif args.command == "publish-codex-usage":
+            import json
+            service.publish_codex_usage(board=board, task_id=args.task,
+                                        messages=json.loads(args.message))
         elif args.command == "done":
             service.done(
                 board=board,
